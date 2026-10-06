@@ -1,0 +1,20 @@
+{
+  "full_phase_seconds": 480,
+  "pilot_phase_seconds": 120,
+  "default_budget_sgd": 5000,
+  "chrome_shortcut": "Google Chrome",
+  "calc_shortcut": "OpenOffice Calc",
+  "calc_name_box_point": null,
+  "homepages": [
+    {"url": "https://www.coinmarketcap.com", "term": "Bitcoin"},
+    {"url": "https://www.coursera.org", "term": "course"},
+    {"url": "https://www.coinbase.com", "term": "crypto"},
+    {"url": "https://coingecko.com", "term": "Bitcoin"},
+    {"url": "https://www.samsung.com", "term": "Galaxy"},
+    {"url": "https://aws.amazon.com", "term": "cloud"},
+    {"url": "https://www.amazon.com", "term": "deals"},
+    {"url": "https://www.apple.com", "term": "Mac"},
+    {"url": "https://apnews.com", "term": "news"},
+    {"url": "https://www.dell.com", "term": "laptop"}
+  ]
+}
