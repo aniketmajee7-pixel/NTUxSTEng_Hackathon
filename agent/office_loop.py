@@ -3,7 +3,9 @@
 Each task takes the Session so the agent keeps one OpenOffice alive across tasks.
 
 Calc results are read back through the clipboard (Ctrl+C on the cell) and a wrong value is
-retyped, the way a person double-checks a total before saving.
+retyped, the way a person double-checks a total before saving. Cells are often reached with
+the mouse: `calibrate` finds the sheet on screen (AOO exposes no cells to UI Automation), and
+`goto_cell` clicks a cell and checks its headers lit up, falling back to the keyboard.
 
 Run on the VM:  python office_loop.py [impress]   (then let go of the mouse)
 Files are saved to Documents as native .odt/.ods/.odp (no format dialog to trip over).
@@ -13,11 +15,13 @@ sys.dont_write_bytecode = True  # no __pycache__/*.pyc from python.exe (EID 11)
 
 import time
 
+import screen
 import timing
+import vision
 from content import sentence, world_sentence
 from human_input import (VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_HOME, VK_MENU,
-                         VK_LEFT, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP, click_in, ensure_focus, hold_key,
-                         hotkey, tap, type_text)
+                         VK_LEFT, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP, click, click_in,
+                         ensure_focus, hold_key, hotkey, move_to, tap, type_text)
 from session import run_standalone, stamped
 
 ITEMS = ["Laptop", "Monitor", "Keyboard", "Docking station", "Headset", "Webcam", "Projector",
@@ -44,21 +48,91 @@ def type_paragraph(hwnd, sentences, rng):
 
 
 def enter_cell(hwnd, text, last=False):
-    """Type a value, drop any AutoInput suggestion with Delete, then advance (Tab/Enter)."""
+    """Type a value, drop any AutoInput suggestion with Delete, then advance (Tab/Enter).
+
+    An empty value just skips the cell: Delete outside cell edit mode opens AOO's "Delete
+    Contents" dialog, which then swallows the following keystrokes.
+    """
     ensure_focus(hwnd)
-    type_text(text, typo_rate=0, exact=True)
-    tap(VK_DELETE)
+    if text:
+        type_text(text, typo_rate=0, exact=True)
+        tap(VK_DELETE)
     tap(VK_RETURN if last else VK_TAB)
     time.sleep(timing.think_s(0.35))
 
 
 def new_sheet(session):
     hwnd = session.new_doc("calc")
-    click_in(hwnd, 0.12, 0.25)                          # roughly cell A1
+    click_in(hwnd, 0.12, 0.25)                          # somewhere in the sheet (B3 at 1280x800)
     time.sleep(timing.perceive_s())
     ensure_focus(hwnd)
     hotkey(VK_CONTROL, VK_HOME)
+    calibrate(session, hwnd)
     return hwnd
+
+
+def calibrate(session, hwnd):
+    """With A1 selected, find the sheet on screen (one full grab). Cached on the session:
+    every Calc window is maximised, so the geometry holds all day. Returns the grid or None,
+    in which case cells are reached with the keyboard."""
+    if session.calc_grid is None:
+        rect = screen.window_rect(hwnd)
+        grid = vision.calc_grid(*screen.grab_planes(rect))
+        if grid:
+            grid["left"], grid["top"], grid["rect"] = rect[0], rect[1], rect
+            session.calc_grid = grid
+            print(f"    Calc grid found: {grid['cw']}x{grid['rh']} px cells, "
+                  f"{grid['ncol']}x{grid['nrow']} visible", flush=True)
+        else:
+            print("    Calc grid not found; cells by keyboard", flush=True)
+    return session.calc_grid
+
+
+def selected_cell(grid):
+    """(col, row) whose column and row headers are lit right now, or None (two 1-px grabs).
+    Positions only, not labels: a scrolled view would read as the clicked screen cell, so
+    `goto_cell(home=True)` re-anchors the view at A1 first wherever that isn't certain."""
+    l, t = grid["left"], grid["top"]
+    right = l + grid["x0"] + grid["cw"] * grid["ncol"]
+    _, _, _, line = screen.grab_planes((l, t + grid["hy"], right, t + grid["hy"] + 1))
+    cols = vision.highlighted(line, grid["x0"], grid["cw"], grid["ncol"])
+    bottom = t + grid["y0"] + grid["rh"] * grid["nrow"]
+    _, _, _, side = screen.grab_planes((l + grid["sx"], t, l + grid["sx"] + 1, bottom))
+    rows = vision.highlighted(side, grid["y0"], grid["rh"], grid["nrow"])
+    return (cols[0], rows[0]) if len(cols) == 1 and len(rows) == 1 else None
+
+
+def goto_cell(session, hwnd, col, row, home=False):
+    """Put the Calc cursor on (col, row), 0-based (A1 = (0, 0)).
+
+    With a known grid: point at the cell (somewhere inside, not its centre), click, and
+    confirm from the lit headers. Otherwise, or if the click missed: Ctrl+Home + arrows.
+    Never call mid-edit: clicking while a formula is being typed inserts a cell reference.
+    `home`: Ctrl+Home first, so the view is known to start at A1 (a reopened document).
+    Returns True if the mouse got there.
+    """
+    grid, rng = session.calc_grid, session.rng
+    ensure_focus(hwnd)
+    if grid and screen.window_rect(hwnd) != grid["rect"]:
+        grid = None                                     # not where we measured it: keyboard
+    if grid and home:
+        hotkey(VK_CONTROL, VK_HOME)
+        time.sleep(timing.short_s(0.3))
+    if grid and col < grid["ncol"] - 1 and row < grid["nrow"] - 1:
+        x = grid["left"] + grid["x0"] + grid["cw"] * (col + rng.uniform(0.25, 0.7))
+        y = grid["top"] + grid["y0"] + grid["rh"] * (row + rng.uniform(0.3, 0.7))
+        move_to(int(x), int(y))
+        time.sleep(timing.think_s(0.25))
+        click()
+        time.sleep(timing.short_s(0.25))
+        if selected_cell(grid) == (col, row):
+            return True
+        print(f"    click missed cell {col},{row}; using the keyboard", flush=True)
+        ensure_focus(hwnd)
+    hotkey(VK_CONTROL, VK_HOME)
+    time.sleep(timing.short_s(0.2))
+    move_cursor(col, row)
+    return False
 
 
 def check_cell(session, hwnd, expected, retype, tol=0.01):
@@ -126,6 +200,8 @@ def calc_task(session):
         qty = rng.randint(1, 20)
         price = rng.choice(PRICES)
         total += qty * price
+        if session.calc_grid and rng.random() < 0.5:   # click the row's first cell
+            goto_cell(session, hwnd, 0, r - 1)
         enter_cell(hwnd, item)
         enter_cell(hwnd, str(qty))
         enter_cell(hwnd, f"{price:.2f}")
@@ -139,7 +215,10 @@ def calc_task(session):
     enter_cell(hwnd, "")
     enter_cell(hwnd, sum_formula, last=True)           # cursor now at A{total_row + 1}
     time.sleep(timing.read_s(15))
-    move_cursor(dx=3, dy=-1)                            # back up to the total in D{total_row}
+    if session.calc_grid:                               # back up to the total in D{total_row}
+        goto_cell(session, hwnd, 3, total_row - 1)
+    else:
+        move_cursor(dx=3, dy=-1)
     check_cell(session, hwnd, round(total, 2), sum_formula)
     time.sleep(timing.read_s(10))
 

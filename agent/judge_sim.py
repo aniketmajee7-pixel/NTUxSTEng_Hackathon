@@ -12,7 +12,8 @@ feature families from the detection literature:
     position ("Kinematic Features Are All You Need"), landing error;
   * macro gaps - CV, lull presence, Goh-Barabasi burstiness B, Fano factor over 1-min bins;
   * content - duplicate 6-gram rate vs the corpus, distinct-2 diversity (Chimera);
-  * perception - vision.text_spots precision/recall and blank detection on synthetic pages.
+  * perception - vision.text_spots precision/recall, blank and cookie-banner detection on
+    synthetic pages.
 
 Two gates, because one run is one persona:
   * PERSONA_RANGES - every persona must land inside the human population range;
@@ -274,7 +275,9 @@ MEAN_RANGES = {
 }
 CONTENT_RANGES = {"dup_6gram_rate": (0.0, 0.02), "distinct_2": (0.25, 1.0),
                   "sent_dup_rate": (0.0, 0.05), "vision_precision": (0.85, 1.0),
-                  "vision_recall_ok": (1, 1), "vision_blank_ok": (1, 1)}
+                  "vision_recall_ok": (1, 1), "vision_blank_ok": (1, 1),
+                  "vision_consent_ok": (1, 1), "vision_warning_ok": (1, 1),
+                  "vision_grid_ok": (1, 1)}
 
 
 def main(seed=20261002):
@@ -308,9 +311,10 @@ def main(seed=20261002):
         print(f"{k:<18}{mn:>9.3f}{mean:>9.3f}{mx:>9.3f}   [{lo:>6.2f},{hi:>7.2f}]  {tstr:>16}  "
               f"{'; '.join(flag)}")
     extra = content_features(rng)
-    prec, recall_ok, blank_ok = vision.selftest()
+    prec, recall_ok, blank_ok, consent_ok, warning_ok, grid_ok = vision.selftest()
     extra.update(vision_precision=prec, vision_recall_ok=float(recall_ok),
-                 vision_blank_ok=float(blank_ok))
+                 vision_blank_ok=float(blank_ok), vision_consent_ok=float(consent_ok),
+                 vision_warning_ok=float(warning_ok), vision_grid_ok=float(grid_ok))
     for k, v in extra.items():
         lo, hi = CONTENT_RANGES[k]
         ok = lo <= v <= hi

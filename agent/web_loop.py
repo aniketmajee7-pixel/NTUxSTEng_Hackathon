@@ -25,12 +25,17 @@ from human_input import (VK_CONTROL, VK_LEFT, VK_MENU, click, double_click, ensu
                          focus, hotkey, hover_in, move_to, scroll, wait_for_window, window_title)
 from session import run_standalone
 
-# The sites the organisers say load cleanly once root_ca.crt is installed.
-SITES = ["www.coinmarketcap.com", "www.coursera.org", "www.coinbase.com", "coingecko.com",
-         "www.samsung.com", "aws.amazon.com", "www.amazon.com", "www.apple.com", "apnews.com",
-         "www.dell.com"]
-NEWSY = ["apnews.com", "www.coursera.org", "www.coinmarketcap.com", "coingecko.com",
-         "www.coinbase.com", "aws.amazon.com"]
+# Homepages from the organisers' list. VM recordings (teammates' desktop-demo handoff, 10 Oct): coinbase,
+# amazon and coursera stay on Chrome's privacy warning (HSTS: no Proceed); dell and
+# coinmarketcap paint nothing; cloud.google.com and cloudflare.com show no Proceed link.
+# Those are left out. The rest may still show the warning first; `Session.open_url` goes
+# through Advanced -> Proceed and drops any site that still won't load.
+SITES = ["www.samsung.com", "aws.amazon.com", "www.apple.com", "apnews.com", "coingecko.com",
+         "www.archive.org", "www.arstechnica.com", "www.aliexpress.com", "www.arxiv.org",
+         "www.asana.com", "www.asus.com", "www.bbc.com", "www.binance.com", "www.bing.com",
+         "www.bleacherreport.com", "www.booking.com", "www.cnet.com", "www.cnn.com"]
+NEWSY = ["apnews.com", "www.bbc.com", "www.cnn.com", "www.arstechnica.com", "www.cnet.com",
+         "coingecko.com", "www.bleacherreport.com", "aws.amazon.com"]
 
 _STOP = {"sign", "menu", "home", "shop", "cart", "search", "more", "login", "help", "about",
          "learn", "view", "this", "that", "with", "your", "from", "have", "will", "account",
@@ -89,9 +94,18 @@ def try_a_link(hwnd, rng=random):
         ensure_focus(hwnd)
         hotkey(VK_MENU, VK_LEFT)
         try:
-            wait_for_window(before[:40], timeout=8)
-        except TimeoutError:                            # slow back-navigation: carry on anyway
-            pass
+            wait_for_window(before[:40], timeout=14)    # a slow Back must not become Ctrl+W
+        except TimeoutError:
+            # Back did nothing: the link opened in a new tab (no history). Close that tab
+            # to land on the page we came from, keeping the session's tab count true.
+            if window_title(hwnd) != before:
+                time.sleep(timing.think_s(0.6))
+                ensure_focus(hwnd)
+                hotkey(VK_CONTROL, ord("W"))
+                try:
+                    wait_for_window(before[:40], timeout=5)
+                except TimeoutError:
+                    pass
         time.sleep(timing.read_s(10))
     return True
 
@@ -130,8 +144,9 @@ def web_task(session, sites=None):
     rng = session.rng
     sites = sites or rng.sample(NEWSY, rng.randint(1, 2))
     for i, site in enumerate(sites):
-        session.open_url(site, new_tab=(rng.random() < 0.5))
-        hwnd = session.chrome
+        hwnd = session.open_url(site, new_tab=(rng.random() < 0.5))
+        if hwnd is None:                                # warning with no way past / blank page
+            continue
         read_page(hwnd, rng)
         if rng.random() < 0.6:
             try_a_link(hwnd, rng)

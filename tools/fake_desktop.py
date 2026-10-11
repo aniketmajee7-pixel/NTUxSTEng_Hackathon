@@ -31,7 +31,7 @@ sys.dont_write_bytecode = True
 AGENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agent")
 sys.path.insert(0, AGENT_DIR)
 
-SW, SH = 1920, 1080
+SW, SH = 1280, 800          # the VM's screen
 CONSOLE_CLASS = "ConsoleWindowClass"
 OFFICE_APPS = {"swriter": "Writer", "scalc": "Calc", "simpress": "Impress"}
 
@@ -71,6 +71,7 @@ class Desktop:
         self.menu = None        # open AOO menu state
         self.last_click = (0.0, (0, 0))
         self.chrome_sel = None
+        self.consent_ok = set()  # hosts whose cookie modal has been accepted
         self.console = self.new("C:\\agent\\python.exe", CONSOLE_CLASS, "console")
 
     # windows
@@ -104,12 +105,21 @@ class Desktop:
         self.events.append(e)
 
     # ------------------------------------------------------------ keyboard
+    SIDED = {0xA0: 0x10, 0xA1: 0x10, 0xA2: 0x11, 0xA3: 0x11, 0xA4: 0x12, 0xA5: 0x12, 0x5C: 0x5B}
+
+    def held(self, vk):
+        """GetAsyncKeyState: the fake tracks one key per modifier, reported as the left one."""
+        return self.SIDED.get(vk, vk) in self.mods and vk not in (0xA1, 0xA3, 0xA5, 0x5C)
+
     def key(self, vk, up):
+        vk = self.SIDED.get(vk, vk)
         if up:
             self.mods.discard(vk)
             return
         if vk in (0x10, 0x11, 0x12, 0x5B):
             self.mods.add(vk)
+            return
+        if vk == 0xE8:                                  # unassigned: the Win/Alt-up mask
             return
         h = self.fg()
         w = self.wins.get(h)
@@ -117,9 +127,15 @@ class Desktop:
         if win and vk == ord("R"):
             self.dialog("Run", "run")
             return
+        if win and vk == 0x26:                          # Win+Up maximises the foreground window
+            if w is not None:
+                w.data["max"] = True
+            return
         if win and vk == ord("E"):
             self.new("Home", "CabinetWClass", "explorer", {"addr": None})
             return
+        if win:
+            raise Fail(f"Win held during vk={vk:#x}: Windows would take the shortcut")
         if w is None:
             raise Fail(f"key {vk:#x} with no foreground window")
         if w.app == "console":
@@ -214,6 +230,11 @@ class Desktop:
                 self.log("nav", url)
                 if not re.fullmatch(r"[a-z0-9.\-]+\.[a-z]{2,}", url):
                     raise Fail(f"bad URL typed in omnibox: {url!r}")
+                if url in HSTS_SITES or url in WARN_SITES:
+                    d["warn"] = {"host": url, "open": False, "hsts": url in HSTS_SITES}
+                    d["hist"].append("Privacy error")
+                    w.title = "Privacy error - Google Chrome"
+                    return
                 d["hist"].append(url)
                 w.title = f"{url} - Google Chrome"
             return
@@ -307,14 +328,33 @@ class Desktop:
         return [n for n, _ in sorted(self.mtime.items(), key=lambda kv: -kv[1])
                 if self.disk[n][0] != "Text"]
 
+    @staticmethod
+    def calc_commit(d):
+        if d["edit"] is not None:
+            d["grid"][tuple(d["cur"])] = "".join(d["edit"])
+            d["edit"] = None
+            d["dirty"] = True
+
+    def calc_click(self, d):
+        """A click on the sheet selects that cell. Mid-formula it would insert a reference."""
+        x, y = self.cursor
+        if not (x >= CALC_X0 and CALC_Y0 <= y < CALC_Y0 + CALC_NROW * CALC_RH):
+            return
+        if d["edit"] and d["edit"][0] == "=":
+            raise Fail(f"clicked the sheet while typing {''.join(d['edit'])!r}: "
+                       "AOO would insert a cell reference")
+        self.calc_commit(d)
+        d["cur"][:] = [(x - CALC_X0) // CALC_CW, (y - CALC_Y0) // CALC_RH]
+        if self.miss and random.random() < 0.4:         # --miss: the click lands a row low
+            d["cur"][1] += 1
+        d["tabstart"] = None
+        self.log("cellclick", tuple(d["cur"]))
+
     def k_calc(self, d, vk, ctrl, shift):
         cur = d["cur"]
 
         def commit():
-            if d["edit"] is not None:
-                d["grid"][tuple(cur)] = "".join(d["edit"])
-                d["edit"] = None
-                d["dirty"] = True
+            self.calc_commit(d)
 
         if ctrl and vk == 0x24:                         # Ctrl+Home
             commit()
@@ -349,8 +389,9 @@ class Desktop:
         elif vk == 0x1B:
             d["edit"] = None
         elif vk == 0x2E:
-            if d["edit"] is None:
-                d["grid"].pop(tuple(cur), None)
+            if d["edit"] is None:                       # AOO: opens the Delete Contents dialog
+                raise Fail(f"Delete on cell {tuple(cur)} outside edit mode opens AOO's "
+                           "'Delete Contents' dialog")
         elif vk == 0x08:
             if d["edit"]:
                 d["edit"].pop()
@@ -482,7 +523,26 @@ class Desktop:
             return
         if w.app == "console":
             raise Fail("clicked the console window")
+        if w.app == "office" and w.data.get("kind") == "Calc":
+            self.calc_click(w.data)
+            return
+        if w.app == "chrome" and w.title.startswith("Privacy error"):
+            d = w.data["warn"]
+            if in_box(self.cursor, WARN_SAFETY):
+                raise Fail("clicked 'Back to safety' on the privacy warning")
+            if in_box(self.cursor, WARN_ADV):
+                d["open"] = True
+            elif d["open"] and not d["hsts"] and in_box(self.cursor, WARN_LINK_HIT):
+                w.data["hist"][-1] = d["host"]
+                w.title = f"{d['host']} - Google Chrome"
+                self.log("proceed", d["host"])
+            return
         if w.app == "chrome":
+            if self.consent_shown(w):
+                if in_box(self.cursor, CONSENT_BTN):
+                    self.consent_ok.add(self.host(w))
+                    self.log("consent", self.host(w))
+                return                                  # the modal swallows other clicks
             kind = cursor_kind_at(self.cursor)
             if kind == "hand" and not dbl:
                 w.data["hist"].append("404 Not Found")
@@ -494,6 +554,71 @@ class Desktop:
                 self.chrome_sel = None
 
 
+    @staticmethod
+    def host(w):
+        return w.title.split(" - ")[0]
+
+    def consent_shown(self, w):
+        return self.host(w) in CONSENT_SITES and self.host(w) not in self.consent_ok
+
+
+CONSENT_SITES = {"www.samsung.com"}
+CONSENT_PANEL = (300, 220, 980, 600)        # screen x0, y0, x1, y1 of the dark modal
+CONSENT_BTN = (700, 520, 940, 580)          # its Accept button
+
+# How sites behaved in the VM recordings: blank pages, a privacy warning with no way past
+# (HSTS), and a privacy warning that Advanced -> Proceed gets through.
+BLANK_SITES = {"www.dell.com", "www.coinmarketcap.com"}
+HSTS_SITES = {"www.coinbase.com", "www.amazon.com", "www.coursera.org"}
+WARN_SITES = {"www.bbc.com", "www.asus.com", "apnews.com"}
+WARN_TEXT = (340, 200, 940, 300)            # heading + paragraph of the warning
+WARN_SAFETY = (790, 420, 940, 456)          # filled "Back to safety" button
+WARN_ADV = (345, 420, 455, 456)             # "Advanced"
+WARN_DETAILS = (340, 480, 940, 560)         # text revealed by Advanced
+WARN_LINK = (345, 586, 640, 606)            # "Proceed to <host> (unsafe)" (ink)
+WARN_LINK_HIT = (345, 580, 640, 612)        # its hit box: the whole line-height
+
+# Maximised AOO Calc at 1280x800 (VM: 81 px columns, 17 px rows, blue-lit headers)
+CALC_X0, CALC_Y0, CALC_CW, CALC_RH = 40, 154, 81, 17
+CALC_NCOL, CALC_NROW = (SW - CALC_X0) // CALC_CW, (SH - 40 - CALC_Y0) // CALC_RH
+
+
+def calc_planes(cur):
+    """Full-screen (gray, blue) of a Calc window whose cursor is on `cur`."""
+    g, b = bytearray([240] * (SW * SH)), bytearray(SW * SH)
+
+    def fill(x0, x1, y0, y1, v, bv=0):
+        for y in range(max(0, y0), min(SH, y1)):
+            g[y * SW + x0:y * SW + x1] = bytes([v]) * (x1 - x0)
+            b[y * SW + x0:y * SW + x1] = bytes([bv]) * (x1 - x0)
+
+    fill(300, 316, 60, 76, 110, 120)                    # a blue toolbar icon
+    hy0 = CALC_Y0 - CALC_RH
+    for c in range(CALC_NCOL + 1):
+        x = CALC_X0 + c * CALC_CW
+        lit = c == cur[0]
+        fill(x, min(SW, x + CALC_CW - 1), hy0, CALC_Y0, 127 if lit else 240, 146 if lit else 0)
+        fill(min(SW, x + CALC_CW - 1), min(SW, x + CALC_CW), hy0, CALC_Y0, 105)
+        fill(min(SW, x + 37), min(SW, x + 43), hy0 + 5, CALC_Y0 - 4, 20)       # the letter
+    for r in range(CALC_NROW):
+        y = CALC_Y0 + r * CALC_RH
+        lit = r == cur[1]
+        fill(0, CALC_X0 - 1, y, y + CALC_RH - 1, 127 if lit else 240, 146 if lit else 0)
+        fill(0, CALC_X0 - 1, y + CALC_RH - 1, y + CALC_RH, 105)
+        fill(16, 22, y + 4, y + CALC_RH - 4, 20)                                 # the digit
+        fill(CALC_X0, SW, y, y + CALC_RH - 1, 255)                               # cells
+        fill(CALC_X0, SW, y + CALC_RH - 1, y + CALC_RH, 192)                     # gridline
+    for c in range(CALC_NCOL + 1):
+        x = CALC_X0 + c * CALC_CW + CALC_CW - 1
+        if x < SW:
+            fill(x, x + 1, CALC_Y0, CALC_Y0 + CALC_NROW * CALC_RH, 192)
+    return bytes(g), bytes(b)
+
+
+def in_box(p, box):
+    return box[0] <= p[0] < box[2] and box[1] <= p[1] < box[3]
+
+
 US = {**{0x30 + i: str(i) for i in range(10)}, 0x20: " ", 0xBA: ";", 0xBB: "=", 0xBC: ",",
       0xBD: "-", 0xBE: ".", 0xBF: "/", 0xDE: "'", 0xDB: "[", 0xDD: "]", 0xC0: "`", 0xDC: "\\"}
 SHIFTED = {"1": "!", "2": "@", "3": "#", "4": "$", "5": "%", "6": "^", "7": "&", "8": "*",
@@ -503,16 +628,26 @@ REV = {v: k for k, v in US.items()}
 WORDS = ["Inspiron", "Latitude", "MacBook", "Galaxy", "Vivobook", "Bitcoin", "Courses",
          "laptops", "Shop", "Compare", "Pricing", "Deals"]
 
-LINK_BAND = (150, 330)          # page rows (screen y) holding links
-TEXT_BAND = (420, 900)          # page rows holding selectable text
+LINK_BAND = (150, 300)          # page rows (screen y) holding links
+TEXT_BAND = (360, 760)          # page rows holding selectable text
+PAGE_X = (80, 1200)
 
 
 def cursor_kind_at(p):
     x, y = p
-    if 120 <= x <= 1700 and LINK_BAND[0] <= y < LINK_BAND[1]:
+    if PAGE_X[0] <= x <= PAGE_X[1] and LINK_BAND[0] <= y < LINK_BAND[1]:
         return "hand"
-    if 120 <= x <= 1700 and TEXT_BAND[0] <= y < TEXT_BAND[1]:
+    if PAGE_X[0] <= x <= PAGE_X[1] and TEXT_BAND[0] <= y < TEXT_BAND[1]:
         return "ibeam"
+    return "arrow"
+
+
+def warning_cursor(w, p):
+    d = w.data.get("warn")
+    if in_box(p, WARN_ADV) or in_box(p, WARN_SAFETY):
+        return "hand"                           # Chrome styles both buttons cursor: pointer
+    if d["open"] and not d["hsts"] and in_box(p, WARN_LINK_HIT):
+        return "hand"
     return "arrow"
 
 
@@ -647,9 +782,11 @@ def install(D):
         GetForegroundWindow=D.fg, SetForegroundWindow=setfg, BringWindowToTop=setfg,
         VkKeyScanW=vkscan, GetSystemMetrics=lambda i: SW if i == 0 else SH,
         GetWindow=lambda h, c: 0, GetWindowLongW=lambda h, i: 0, IsIconic=lambda h: 0,
+        IsZoomed=lambda h: int(bool(h in D.wins and D.wins[h].data.get("max"))),
         MapVirtualKeyW=lambda v, t: 0, GetAncestor=lambda h, f: h,
         WindowFromPoint=lambda p: D.fg(), GetWindowThreadProcessId=lambda h, p: 2,
         AttachThreadInput=lambda a, b, c: 1, GetWindowRect=rect, GetCursorPos=cursorpos,
+        GetAsyncKeyState=lambda vk: -32768 if D.held(vk) else 0,
     )
     kernel32 = dict(GetCurrentThreadId=lambda: 1, GetConsoleWindow=lambda: D.console,
                     GetStdHandle=lambda x: 1, GetConsoleMode=lambda h, m: 0)
@@ -667,22 +804,75 @@ def install(D):
         w, h = max(1, (r - l) // step), max(1, (b - t) // step)
         page = D.wins.get(D.fg())
         g = bytearray([245] * (w * h))
+        if page and page.app == "chrome" and page.title.startswith("Privacy error"):
+            g = bytearray([255] * (w * h))
+            wd = page.data["warn"]
+            boxes = [(WARN_TEXT, 40, 0.45), (WARN_SAFETY, 122, 1.0), (WARN_ADV, 120, 0.5)]
+            if wd["open"]:
+                boxes.append((WARN_DETAILS, 50, 0.45))
+                if not wd["hsts"]:
+                    boxes.append((WARN_LINK, 60, 0.5))
+            rr = random.Random(7)
+            for box, v, dens in boxes:
+                for yy in range(max(0, (box[1] - t) // step), min(h, (box[3] - t) // step)):
+                    if dens < 1 and (yy * step) % 20 >= 12:
+                        continue                        # gaps between text lines
+                    for xx in range(max(0, (box[0] - l) // step), min(w, (box[2] - l) // step)):
+                        if dens >= 1 or rr.random() < dens:
+                            g[yy * w + xx] = v
+            return w, h, bytes(g)
+        if page and page.app == "chrome" and D.host(page) in BLANK_SITES:
+            return w, h, bytes(g)
         if page and page.app == "chrome" and not page.title.startswith("New Tab"):
             rr = random.Random(zlib.crc32(page.title.encode()) & 0xFFFF)
             for band in (LINK_BAND, TEXT_BAND):
                 for sy in range(band[0], band[1] - 12, 22):
                     y0 = (sy - t) // step
-                    for sx in range(140, 1680, 7):
+                    for sx in range(PAGE_X[0] + 10, PAGE_X[1] - 10, 7):
                         if rr.random() < 0.35:
                             continue
                         x0 = (sx - l) // step
                         for yy in range(y0, min(h, y0 + 9 // step + 1)):
                             if 0 <= yy < h and 0 <= x0 < w:
                                 g[yy * w + x0] = 30
+            if D.consent_shown(page):
+                for box, v in ((CONSENT_PANEL, 25), (CONSENT_BTN, 145)):
+                    for yy in range(max(0, (box[1] - t) // step), min(h, (box[3] - t) // step)):
+                        for xx in range(max(0, (box[0] - l) // step), min(w, (box[2] - l) // step)):
+                            g[yy * w + xx] = v
         return w, h, bytes(g)
 
     screen.grab_gray = grab_gray
-    screen.cursor_kind = lambda: cursor_kind_at(D.cursor)
+    planes_cache = {}
+
+    def grab_planes(rect, step=1):
+        page = D.wins.get(D.fg())
+        if D.nogrid or not (page and page.app == "office" and page.data.get("kind") == "Calc"):
+            w, h, g = grab_gray(rect, step)
+            return w, h, g, bytes(w * h)
+        key = tuple(page.data["cur"])
+        if key not in planes_cache:
+            planes_cache.clear()
+            planes_cache[key] = calc_planes(key)
+        G, B = planes_cache[key]
+        l, t, r, b = rect
+        xs = range(max(0, l), min(SW, r), step)
+        g, bl = bytearray(), bytearray()
+        for y in range(max(0, t), min(SH, b), step):
+            g += G[y * SW + xs.start:y * SW + xs.stop:step]
+            bl += B[y * SW + xs.start:y * SW + xs.stop:step]
+        return len(xs), len(range(max(0, t), min(SH, b), step)), bytes(g), bytes(bl)
+
+    screen.grab_planes = grab_planes
+    def cursor_kind():
+        page = D.wins.get(D.fg())
+        if page and page.app == "chrome" and page.title.startswith("Privacy error"):
+            return warning_cursor(page, D.cursor)
+        if page and page.app == "chrome" and D.consent_shown(page):
+            return "hand" if in_box(D.cursor, CONSENT_BTN) else "arrow"
+        return cursor_kind_at(D.cursor)
+
+    screen.cursor_kind = cursor_kind
     screen.clipboard_seq = lambda: D.clip_seq
     screen.clipboard_text = lambda: D.clip
 
@@ -696,6 +886,10 @@ def main():
     quiet = "--quiet" in args
     random.seed(seed)
     D = Desktop()
+    D.nogrid = "--nogrid" in args           # vision finds no grid: every cell by keyboard
+    D.miss = "--miss" in args               # some cell clicks land wrong: the fallback after
+    if "--stuck" in args:                   # host shortcut left Win+Shift held (VM, 10 Oct)
+        D.mods |= {0x5B, 0x10}
     install(D)
 
     import persona
@@ -712,16 +906,22 @@ def main():
         "research": lambda: research_task.research_task(s),
         "office": lambda: (office_loop.writer_task(s), office_loop.calc_task(s)),
         "impress": lambda: office_loop.impress_task(s),
-        "web": lambda: web_loop.web_task(s, sites=["apnews.com", "www.dell.com"]),
+        "web": lambda: web_loop.web_task(s, sites=["www.coinbase.com", "www.bbc.com", "www.dell.com",
+                                                   "www.coinbase.com", "apnews.com"]),
         "desk": lambda: (desk_tasks.jot_todo(s), desk_tasks.look_over_documents(s)),
     }
     if which != "agent" and which not in flows:
         raise SystemExit(f"unknown flow {which!r}")
 
     start = clock[0]
-    real_print = print
-    if quiet:
-        builtins.print = lambda *a, **k: None
+    real_print, said = print, []
+
+    def capture(*a, **k):
+        said.append(" ".join(map(str, a)))
+        if not quiet:
+            real_print(*a, **k)
+
+    builtins.print = capture
     try:
         if which == "agent":
             agent.Session = lambda: s
@@ -734,17 +934,42 @@ def main():
 
     problems = []
     left = [w.title for h, w in D.wins.items() if h != D.console]
+    navs = [e[1] for e in D.events if e[0] == "nav"]
+    for host in BLANK_SITES | HSTS_SITES:
+        if navs.count(host) > 1:
+            problems.append(f"dead site {host} typed {navs.count(host)} times")
+    proceeded = {e[1] for e in D.events if e[0] == "proceed"}
+    for host in WARN_SITES & set(navs) - proceeded:
+        problems.append(f"never got past the privacy warning on {host}")
     if left:
         problems.append(f"windows left open: {left}")
+    for line in said:       # the fake's cells read back exactly: any retype means a wrong cell
+        if "retyping" in line or "leaving it" in line or ("click missed" in line and not D.miss):
+            problems.append(f"agent said: {line.strip()}")
+    if any(k == "Calc" for k, _ in D.disk.values()):     # the path under test really ran
+        want = "Calc grid not found" if D.nogrid else "Calc grid found"
+        if not any(line.strip().startswith(want) for line in said):
+            problems.append(f"agent never said {want!r}")
     for name, (kind, content) in D.disk.items():
         if kind == "Calc":
             for cell in content:
-                v = calc_eval(content, cell)
+                try:
+                    v = calc_eval(content, cell)
+                except (TypeError, ZeroDivisionError, AttributeError) as e:
+                    v = f"Err: {e}"
                 if isinstance(v, str) and v.startswith("Err"):
                     problems.append(f"{name}: {content[cell]!r} at {cell} -> {v}")
+                elif content[cell].startswith("="):
+                    # every reference must point at a number: catches values typed one cell off
+                    for a, b in re.findall(r"\$?([A-Z])\$?(\d+)", content[cell]):
+                        ref = (ord(a) - 65, int(b) - 1)
+                        if not isinstance(calc_eval(content, ref), float):
+                            problems.append(f"{name}: {content[cell]!r} at {cell} refers to "
+                                            f"{a}{b} = {content.get(ref, '')!r}")
     print(f"\n== {which} (seed {seed}): {(clock[0] - start) / 60:.1f} simulated minutes")
     for e in D.events:
-        if e[0] in ("run", "nav", "saved", "opened", "explorer", "paste", "link"):
+        if e[0] in ("run", "nav", "saved", "opened", "explorer", "paste", "link", "consent",
+                    "proceed", "cellclick"):
             print("  ", *e)
     if not quiet:
         for name, (kind, content) in D.disk.items():

@@ -28,6 +28,7 @@ kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 dwmapi = ctypes.WinDLL("dwmapi")
 user32.SetProcessDPIAware()
 user32.VkKeyScanW.restype = ctypes.c_short
+user32.GetAsyncKeyState.restype = ctypes.c_short
 user32.WindowFromPoint.restype = wintypes.HWND
 user32.WindowFromPoint.argtypes = [wintypes.POINT]
 # HWND-returning calls must not be truncated to a C int on 64-bit Python
@@ -53,7 +54,7 @@ ULONG_PTR = ctypes.c_size_t
 # Keys a real keyboard sends with the E0 extended prefix. Omitting it is a possible
 # hook-level tell, so we set KEYEVENTF_EXTENDEDKEY for these.
 _EXTENDED = {VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_HOME, VK_END, VK_DELETE, VK_INSERT,
-             VK_PRIOR, VK_NEXT, VK_LWIN}
+             VK_PRIOR, VK_NEXT, VK_LWIN, 0x5C, 0xA3, 0xA5}
 
 # cached once; GetSystemMetrics per-move is wasteful (resource-efficiency smell)
 SCREEN_W = user32.GetSystemMetrics(0)
@@ -121,8 +122,32 @@ def _unicode(c, up=False):
     _send_key(wScan=ord(c), dwFlags=KEYEVENTF_UNICODE | (KEYEVENTF_KEYUP if up else 0))
 
 
+# both sides of each modifier: Win L/R, Shift L/R, Ctrl L/R, Alt L/R (right Ctrl/Alt are E0 keys)
+_MODIFIERS = (VK_LWIN, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5)
+_MASK = 0xE8        # an unassigned VK: tapped while Win/Alt is held, their key-up opens nothing
+
+
+def release_stuck():
+    """Let go of any modifier held down by something other than us.
+
+    Seen on the VM: a host shortcut (Cmd+Shift+5 on the Mac running the noVNC console) left
+    Win+Shift held inside Windows, so Ctrl+S became Win+Ctrl+S (Voice access) and Ctrl+V
+    became Win+Ctrl+V (Sound output). Called before every chord and typing burst; we never
+    hold a modifier ourselves across those calls.
+    """
+    held = [vk for vk in _MODIFIERS if user32.GetAsyncKeyState(vk) & 0x8000]
+    if not held:
+        return
+    if any(vk in (VK_LWIN, 0x5C, 0xA4, 0xA5) for vk in held):
+        _key(_MASK)                    # a lone Win-up opens Start, a lone Alt-up the menu bar
+        _key(_MASK, up=True)
+    for vk in held:
+        _key(vk, up=True)
+
+
 def tap(vk):
     """Press and release one key with a human hold time."""
+    release_stuck()
     _key(vk)
     time.sleep(max(0.03, timing.hold_ms() / 1000.0))
     _key(vk, up=True)
@@ -140,6 +165,7 @@ def _resolve(c):
 
 def hotkey(*vks):
     """Chord: press in order, release in reverse. try/finally guarantees no stuck modifier."""
+    release_stuck()
     pressed = []
     try:
         for vk in vks:
@@ -203,6 +229,7 @@ def _run_key_timeline(strokes):
     """Play strokes as physically consistent down/up events (see timing.schedule_keys)."""
     events = timing.schedule_keys(strokes, _stroke_key, ("vk", VK_SHIFT), ("vk", VK_CONTROL),
                                   PERSONA.rng)
+    release_stuck()
     down = set()
     start = time.perf_counter()
     try:
@@ -298,6 +325,7 @@ def _at_console():
 
 def click():
     check_operator()
+    release_stuck()                                     # a held Shift would extend a selection
     if _at_console():
         return  # guard: a click here would toggle QuickEdit and suspend the agent
     _send_mouse(dwFlags=MOUSEEVENTF_LEFTDOWN)
@@ -432,6 +460,18 @@ def focus(hwnd):
             user32.AttachThreadInput(me, them, False)
     if not _wait_foreground(hwnd, 2.0):
         raise RuntimeError(f"focus: could not bring {window_title(hwnd)!r} to the front")
+    time.sleep(timing.perceive_s())
+
+
+def maximize(hwnd):
+    """Maximise a window the way a person does it from the keyboard (Win+Up), once.
+    Apps reopen at their last size, so a run started with small windows stays small.
+    Leaves `hwnd` in the foreground either way."""
+    focus(hwnd)
+    if user32.IsZoomed(hwnd):
+        return
+    hotkey(VK_LWIN, VK_UP)
+    _poll(lambda: user32.IsZoomed(hwnd), 2.0, 0.1)
     time.sleep(timing.perceive_s())
 
 

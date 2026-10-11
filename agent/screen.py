@@ -84,8 +84,7 @@ def content_rect(hwnd):
     return l, t + (b - t) // 8, r, b                    # skip the title/tool bars
 
 
-def grab_gray(rect, step=2):
-    """Grayscale bytes of `rect` (screen coords) downscaled by `step`. Returns (w, h, bytes)."""
+def _grab_bgra(rect, step):
     l, t, r, b = rect
     sw, sh = max(1, r - l), max(1, b - t)
     w, h = max(1, sw // step), max(1, sh // step)
@@ -105,9 +104,24 @@ def grab_gray(rect, step=2):
         gdi32.DeleteObject(bmp)
         gdi32.DeleteDC(mem)
         user32.ReleaseDC(None, screen)
-    raw = buf.raw
+    return w, h, buf.raw
+
+
+def grab_gray(rect, step=2):
+    """Grayscale bytes of `rect` (screen coords) downscaled by `step`. Returns (w, h, bytes)."""
+    w, h, raw = _grab_bgra(rect, step)
     bl, gr, rd = raw[0::4], raw[1::4], raw[2::4]
     return w, h, bytes((x + y + y + z) >> 2 for x, y, z in zip(bl, gr, rd))
+
+
+def grab_planes(rect, step=1):
+    """(w, h, gray, blue) of `rect`: gray as in `grab_gray`, plus blue minus red (floored at
+    0). Calc marks the selected cell's column and row headers in blue (~(67,115,213) on the
+    VM), which grayscale alone can't tell from a header separator line."""
+    w, h, raw = _grab_bgra(rect, step)
+    bl, gr, rd = raw[0::4], raw[1::4], raw[2::4]
+    gray = bytes((x + y + y + z) >> 2 for x, y, z in zip(bl, gr, rd))
+    return w, h, gray, bytes(x - z if x > z else 0 for x, z in zip(bl, rd))
 
 
 def wait_painted(hwnd, timeout=12.0):

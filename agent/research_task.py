@@ -23,21 +23,22 @@ import screen
 import timing
 from content import sentence, world_sentence
 from human_input import VK_CONTROL, VK_DOWN, VK_END, VK_HOME, click_in, ensure_focus, focus, hotkey, tap
-from office_loop import check_cell, enter_cell, move_cursor, new_sheet, type_paragraph
+from office_loop import check_cell, enter_cell, goto_cell, move_cursor, new_sheet, type_paragraph
 from session import run_standalone, stamped
 from web_loop import copy_a_word, glance, read_page, try_a_link
 
 # Approximate SGD list prices, used as what the "researcher" noted on each site.
 CATALOGUE = {
-    "Dell": [("Dell XPS 13", 1999), ("Dell Inspiron 14", 1099), ("Dell Latitude 7450", 2349),
-             ("Dell Inspiron 16 Plus", 1649)],
+    "Asus": [("ASUS Zenbook 14 OLED", 1598), ("ASUS Vivobook S 15", 1298),
+             ("ASUS ProArt PX13", 2898), ("ASUS Vivobook 16", 999)],
     "Apple": [("MacBook Air 13 M4", 1499), ("MacBook Air 15 M4", 1799), ("MacBook Pro 14 M5", 2399)],
     "Samsung": [("Galaxy Book5 Pro 14", 2098), ("Galaxy Book5 360", 1698), ("Galaxy Book4 Edge", 1898)],
-    "Amazon": [("Lenovo IdeaPad Slim 5", 1049), ("ASUS Vivobook 14", 899), ("Acer Swift Go 14", 1199),
-               ("HP Pavilion 15", 999)],
+    "AliExpress": [("Lenovo IdeaPad Slim 5", 1049), ("Acer Swift Go 14", 1199),
+                   ("HP Pavilion 15", 999), ("Chuwi CoreBook X", 549)],
 }
-SHOP_SITES = {"Dell": "www.dell.com", "Apple": "www.apple.com", "Samsung": "www.samsung.com",
-              "Amazon": "www.amazon.com"}
+# dell.com and amazon.com don't load on the VM (see web_loop.SITES)
+SHOP_SITES = {"Asus": "www.asus.com", "Apple": "www.apple.com", "Samsung": "www.samsung.com",
+              "AliExpress": "www.aliexpress.com"}
 
 
 def money(value):
@@ -88,9 +89,16 @@ def recommendation_text(session, findings, budget):
 def visit_shop(session, research, shop):
     """Browse one shop's homepage, maybe follow a link, copy a word into the notes."""
     rng = session.rng
-    session.open_url(SHOP_SITES[shop], new_tab=(bool(session.world.visited) and rng.random() < 0.5))
+    new_tab = bool(session.world.visited) and rng.random() < 0.5
+    hwnd = session.open_url(SHOP_SITES[shop], new_tab=new_tab)
+    if hwnd is None:                                    # site down today: note it, drop its models
+        rest = [f for f in research.findings if f[0] != shop]
+        if rest:
+            research.findings = rest
+            session.world.findings = [f for f in session.world.findings if f[0] != shop]
+        session.note(f"{shop}: site wouldn't load, skip")
+        return
     session.world.visit(shop)
-    hwnd = session.chrome
     read_page(hwnd, rng, bursts=(2, 4))
     if rng.random() < 0.5:
         try_a_link(hwnd, rng)
@@ -109,8 +117,10 @@ def visit_shop(session, research, shop):
         session.close_tab()
 
 
-def _rows(hwnd, findings, first_row):
+def _rows(session, hwnd, findings, first_row):
     for row, (shop, model, price) in enumerate(findings, start=first_row):
+        if session.calc_grid and session.rng.random() < 0.5:   # click the row's first cell
+            goto_cell(session, hwnd, 0, row - 1)
         for v in (shop, model, str(price)):
             enter_cell(hwnd, v)
         # AOO uses ';' as the function argument separator
@@ -125,29 +135,36 @@ def start_sheet(session, research):
                            str(research.budget))):
         enter_cell(hwnd, v, last=(i == 5))
     rows = [f for f in research.findings if f[0] in session.world.visited]
-    _rows(hwnd, rows, 2)
+    _rows(session, hwnd, rows, 2)
     if rng.random() < 0.5:
         time.sleep(timing.read_s(20))                   # double-check against the notes
-    research.sheet_rows = rows
-    research.sheet = stamped("Laptop comparison")
+    name = stamped("Laptop comparison")
     time.sleep(timing.read_s(15))
-    session.save_doc_as(research.sheet)
+    session.save_doc_as(name)
+    # only once it is on disk: a failed save (recovered as a Draft) must not send
+    # finish_sheet after a file that doesn't exist
+    research.sheet_rows = rows
+    research.sheet = name
     session.close_doc()
 
 
 def finish_sheet(session, research):
     """Reopen the sheet, add the remaining shops, add summary formulas, check them, save."""
     hwnd = session.reopen(research.sheet, "calc")
-    click_in(hwnd, 0.3, 0.45)
-    time.sleep(timing.perceive_s())
-    ensure_focus(hwnd)
-    hotkey(VK_CONTROL, VK_END)                          # last used cell: F of the last data row
-    time.sleep(timing.short_s(0.3))
-    tap(VK_DOWN)
-    tap(VK_HOME)                                        # first empty row, column A
     rest = [f for f in research.findings if f not in research.sheet_rows]
     first = len(research.sheet_rows) + 2
-    _rows(hwnd, rest, first)
+    if session.calc_grid:
+        time.sleep(timing.perceive_s())
+        goto_cell(session, hwnd, 0, first - 1, home=True)  # the first empty row's A cell
+    else:
+        click_in(hwnd, 0.3, 0.45)
+        time.sleep(timing.perceive_s())
+        ensure_focus(hwnd)
+        hotkey(VK_CONTROL, VK_END)                      # last used cell: F of the last data row
+        time.sleep(timing.short_s(0.3))
+        tap(VK_DOWN)
+        tap(VK_HOME)                                    # first empty row, column A
+    _rows(session, hwnd, rest, first)
     last = first + len(rest) - 1
     prices = [p for _, _, p in research.findings]
     lo = min(prices)
@@ -158,7 +175,10 @@ def finish_sheet(session, research):
         enter_cell(hwnd, "")
         enter_cell(hwnd, formula, last=True)
     time.sleep(timing.read_s(15))
-    move_cursor(dx=2, dy=-2)                            # up to the MIN cell in column C
+    if session.calc_grid:                               # the MIN cell: C{last + 1}
+        goto_cell(session, hwnd, 2, last)
+    else:
+        move_cursor(dx=2, dy=-2)
     check_cell(session, hwnd, lo, f_min, tol=0.5)
     tap(VK_DOWN)
     check_cell(session, hwnd, avg, f_avg, tol=0.5)

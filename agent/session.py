@@ -13,18 +13,30 @@ import time
 
 import screen
 import timing
+import vision
 from content import WorldState
 from human_input import (VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_F4, VK_MENU, VK_RETURN,
-                         VK_SHIFT, disable_quickedit, ensure_focus, find_window, find_windows,
-                         focus, foreground, hotkey, is_window, launch, tap, type_text,
-                         wait_for_new_window, wait_for_window, window_title)
+                         VK_SHIFT, click, disable_quickedit, ensure_focus, find_window,
+                         find_windows, focus, foreground, hotkey, is_window, launch, maximize,
+                         move_to, tap, type_text, wait_for_new_window, wait_for_window,
+                         window_title)
 
 CHROME = "Google Chrome"
+WARNING = "Privacy error"   # tab title of Chrome's certificate warning
 NOTEPAD = "Notepad"
 # kind -> (Run command, window title substring, native extension)
 DOCS = {"writer": ("swriter", "OpenOffice Writer", ".odt"),
         "calc": ("scalc", "OpenOffice Calc", ".ods"),
         "impress": ("simpress", "OpenOffice Impress", ".odp")}
+
+
+def _poll_title(hwnd, pred, timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred(window_title(hwnd)):
+            return True
+        time.sleep(0.25)
+    return pred(window_title(hwnd))
 
 
 def stamped(name):
@@ -64,6 +76,8 @@ class Session:
         self.notes_name = None  # set once the notes have been saved
         self.recent = []        # AOO docs saved/opened this session, most recent first
         self.explorers = []     # File Explorer windows we opened
+        self.dead_sites = set()  # hosts that didn't load this run: never typed again
+        self.calc_grid = None   # where Calc's cells are on screen (office_loop.calibrate)
 
     # -- dialogs --------------------------------------------------------
     def dismiss_dialogs(self):
@@ -96,11 +110,20 @@ class Session:
             self.tabs = 1
             screen.wait_painted(self.chrome)
             time.sleep(timing.read_s(20))               # first paint + orient
+        maximize(self.chrome)
         return self.chrome
 
     def open_url(self, host, new_tab=False):
         """Navigate the live Chrome window. The bare host goes in the omnibox (never in the
-        Run dialog); Chrome fills in https:// itself, as it does for a person."""
+        Run dialog); Chrome fills in https:// itself, as it does for a person.
+
+        Returns the Chrome hwnd, or None if the site is no use today: a privacy warning with
+        no way past it, or a page that never paints. Such a host is remembered and not typed
+        again this run (VM: coinbase/amazon/coursera stuck on the warning, dell and
+        coinmarketcap blank).
+        """
+        if host in self.dead_sites:
+            return None
         hwnd = self.ensure_chrome()
         focus(hwnd)
         if new_tab:
@@ -115,11 +138,94 @@ class Session:
         time.sleep(timing.short_s(0.35))
         tap(VK_DELETE)                                  # drop an inline-autocompleted tail
         time.sleep(timing.short_s(0.2))
+        before = window_title(hwnd)
         tap(VK_RETURN)
-        time.sleep(0.6)
-        screen.wait_painted(hwnd)
+        # the old page is still painted until the new one commits: wait for the title first
+        if _poll_title(hwnd, lambda t: t != before, 12):
+            painted = screen.wait_painted(hwnd)
+        elif new_tab or WARNING in before:
+            painted = False                             # nothing even started loading
+        else:
+            painted = screen.wait_painted(hwnd)         # same title: this site was already up
+        if WARNING in window_title(hwnd):
+            if not self.pass_warning(hwnd):
+                self.dead_sites.add(host)
+                return None
+            painted = screen.wait_painted(hwnd)
+        if not painted:
+            time.sleep(timing.read_s(6))                # stare at the empty page, give up
+            self.dead_sites.add(host)
+            return None
         time.sleep(timing.perceive_s() + timing.read_s(8))
+        self.accept_cookies(hwnd)
         return hwnd
+
+    def pass_warning(self, hwnd):
+        """Chrome's "Your connection is not private": Advanced, then "Proceed to <host>
+        (unsafe)", as the organisers instruct. HSTS sites have no Proceed link; then read the
+        explanation and leave. True if the page got past the warning.
+
+        Found by eye, not accessibility: `vision.warning_button` finds the filled "Back to
+        safety" button; "Advanced" is on its row at the left of the text column; the Proceed
+        link is the last line of the expanded text. Every click waits for a hand cursor.
+        """
+        rng = self.rng
+        time.sleep(timing.read_s(14))                   # read the warning
+        rect, step = screen.content_rect(hwnd), 2
+        w, h, g = screen.grab_gray(rect, step)
+        btn = vision.warning_button(w, h, g)
+        if not btn:
+            return False
+        x0, x1, row = btn
+        heading = [x for x, y in vision.text_spots(w, h, g, rng=rng, sample=4000, limit=60)
+                   if y < row - 8 and x < x0]
+        left = rect[0] + step * (min(heading) - 6 if heading else x1 - 300)
+        sy = rect[1] + step * row
+        for dx in (45, 30, 65, 20, 85):                 # slide along the label until the hand
+            move_to(left + dx + rng.gauss(0, 2), sy + rng.gauss(0, 1.5))
+            time.sleep(timing.short_s(0.2))
+            if screen.cursor_kind() == "hand":
+                break
+        else:
+            return False
+        click()
+        time.sleep(timing.perceive_s() + timing.short_s(0.4))
+        w, h, g = screen.grab_gray(rect, step)
+        spots = vision.text_spots(w, h, g, rng=rng, sample=4000, limit=4000)
+        below = sorted(((x, y) for x, y in spots if y > row + 8 and x < x1), key=lambda p: -p[1])
+        for x, y in below[:8]:                          # bottom line first: that is the link
+            move_to(rect[0] + step * x + rng.gauss(0, 2), rect[1] + step * y + rng.gauss(0, 1))
+            time.sleep(timing.short_s(0.25))
+            if screen.cursor_kind() == "hand":
+                time.sleep(timing.think_s(0.6))
+                click()
+                if _poll_title(hwnd, lambda t: WARNING not in t, 6):
+                    return True
+                move_to(rect[0] + step * x + rng.gauss(0, 2), rect[1] + step * y + 3)
+                if screen.cursor_kind() == "hand":     # nothing happened: click again
+                    click()
+                return _poll_title(hwnd, lambda t: WARNING not in t, 12)
+        time.sleep(timing.read_s(25))                   # "can't visit it now" - read why, leave
+        return False
+
+    def accept_cookies(self, hwnd):
+        """Click 'Accept' on a cookie-consent modal if one covers the page (e.g. Samsung):
+        a person can't read or select anything until it is gone. Clicks only where the
+        cursor turns into a hand. Returns True if it clicked."""
+        rect = screen.content_rect(hwnd)
+        step = 4
+        spot = vision.consent_button(*screen.grab_gray(rect, step))
+        if not spot:
+            return False
+        x, y = rect[0] + spot[0] * step, rect[1] + spot[1] * step
+        time.sleep(timing.read_s(30))                   # skim the banner text
+        move_to(x + self.rng.gauss(0, 4), y + self.rng.gauss(0, 2))
+        time.sleep(timing.short_s(0.25))
+        if screen.cursor_kind() != "hand":
+            return False
+        click()
+        time.sleep(timing.think_s(0.8))
+        return True
 
     def close_tab(self):
         if is_window(self.chrome) and self.tabs > 1:
@@ -188,7 +294,7 @@ class Session:
         if not hwnd:
             raise TimeoutError(f"{cmd} did not open a new window")
         time.sleep(timing.read_s(15))
-        focus(hwnd)
+        maximize(hwnd)
         self.doc = hwnd
         return hwnd
 
@@ -235,7 +341,7 @@ class Session:
         if DOCS[kind][1] not in window_title(hwnd):
             raise RuntimeError(f"reopen: {window_title(hwnd)!r} is not a {kind} doc")
         time.sleep(timing.read_s(10))
-        focus(hwnd)
+        maximize(hwnd)
         self.doc = hwnd
         self.saved_doc(name)
         return hwnd
