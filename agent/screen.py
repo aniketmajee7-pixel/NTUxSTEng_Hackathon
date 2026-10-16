@@ -56,6 +56,24 @@ class CURSORINFO(ctypes.Structure):
 
 # ---------------------------------------------------------------- regions
 
+def poll(fn, timeout, interval=0.25, last_try=False):
+    """Call fn until it returns something truthy (returned) or `timeout` s pass (None; with
+    `last_try`, fn's answer from one final call)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        result = fn()
+        if result:
+            return result
+        time.sleep(interval)
+    return fn() if last_try else None
+
+
+def class_name(hwnd):
+    buf = ctypes.create_unicode_buffer(64)
+    user32.GetClassNameW(hwnd, buf, 64)
+    return buf.value
+
+
 def window_rect(hwnd):
     r = wintypes.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(r))
@@ -70,9 +88,7 @@ def content_rect(hwnd):
     best = []
 
     def cb(child, _):
-        buf = ctypes.create_unicode_buffer(64)
-        user32.GetClassNameW(child, buf, 64)
-        if buf.value == "Chrome_RenderWidgetHostHWND" and user32.IsWindowVisible(child):
+        if class_name(child) == "Chrome_RenderWidgetHostHWND" and user32.IsWindowVisible(child):
             l, t, r, b = window_rect(child)
             best.append(((r - l) * (b - t), (l, t, r, b)))
         return True
@@ -110,8 +126,7 @@ def _grab_bgra(rect, step):
 def grab_gray(rect, step=2):
     """Grayscale bytes of `rect` (screen coords) downscaled by `step`. Returns (w, h, bytes)."""
     w, h, raw = _grab_bgra(rect, step)
-    bl, gr, rd = raw[0::4], raw[1::4], raw[2::4]
-    return w, h, bytes((x + y + y + z) >> 2 for x, y, z in zip(bl, gr, rd))
+    return w, h, bytes((b + g + g + r) >> 2 for b, g, r in zip(raw[0::4], raw[1::4], raw[2::4]))
 
 
 def grab_planes(rect, step=1):
@@ -120,18 +135,14 @@ def grab_planes(rect, step=1):
     VM), which grayscale alone can't tell from a header separator line."""
     w, h, raw = _grab_bgra(rect, step)
     bl, gr, rd = raw[0::4], raw[1::4], raw[2::4]
-    gray = bytes((x + y + y + z) >> 2 for x, y, z in zip(bl, gr, rd))
-    return w, h, gray, bytes(x - z if x > z else 0 for x, z in zip(bl, rd))
+    gray = bytes((b + g + g + r) >> 2 for b, g, r in zip(bl, gr, rd))
+    return w, h, gray, bytes(b - r if b > r else 0 for b, r in zip(bl, rd))
 
 
 def wait_painted(hwnd, timeout=12.0):
     """Wait (polling ~3x/s on a coarse 1/8 grab) until the page area is no longer blank."""
-    end = time.time() + timeout
-    while time.time() < end:
-        if not vision.is_blank(*grab_gray(content_rect(hwnd), step=8)):
-            return True
-        time.sleep(0.3)
-    return False
+    return bool(poll(lambda: not vision.is_blank(*grab_gray(content_rect(hwnd), step=8)),
+                     timeout, 0.3))
 
 
 # ---------------------------------------------------------------- cursor
@@ -181,9 +192,4 @@ def clipboard_text():
 
 def wait_clipboard_change(seq, timeout=1.5):
     """Wait until the clipboard sequence number moves past `seq`; True if it did."""
-    end = time.time() + timeout
-    while time.time() < end:
-        if clipboard_seq() != seq:
-            return True
-        time.sleep(0.05)
-    return False
+    return bool(poll(lambda: clipboard_seq() != seq, timeout, 0.05))

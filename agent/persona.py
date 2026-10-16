@@ -9,7 +9,7 @@ import math
 import random
 import time
 
-OU_RHO, OU_SD = 0.85, 0.08  # OU pace in log-IKI; gives human lag-1 autocorr ~0.08
+OU_RHO, OU_SD = 0.85, 0.10  # OU pace in log-IKI; gives human lag-1 autocorr ~0.08
 
 # Eight coarse typist clusters (mean IKI ms, hold-mean ms) loosely after Aalto 136M /
 # "How We Type"; a run lands near one of them, then is jittered so no two runs match.
@@ -31,12 +31,14 @@ class Persona:
         self.hold_ms = base_hold * r.uniform(0.93, 1.07)        # key-down duration centre
         self.hold_sigma = r.uniform(0.20, 0.26)                 # log-space spread of hold
         self.error_rate = r.uniform(0.03, 0.07)                 # typos per char
-        self.uncorrected_frac = r.uniform(0.04, 0.12)           # share of typos left in
+        self.uncorrected_frac = r.uniform(0.01, 0.04)           # share of typos left in
         self.fitts_a = r.uniform(0.045, 0.085)                  # Fitts intercept (s)
         self.fitts_b = r.uniform(0.085, 0.125)                  # Fitts slope (s / bit)
         self.overshoot_prob = r.uniform(0.18, 0.38)             # long-move overshoot chance
         self.tremor_amp = r.uniform(0.6, 1.4)                   # px, scaled by slowness
         self.correction_bias = r.uniform(0.7, 1.3)              # how many corrective submovements
+        self.curve = r.uniform(0.04, 0.08)                      # typical path bow / distance
+        self.curve_side = r.choice((-1, 1)) if r.random() < 0.8 else 0  # habitual side, if any
         self.pause_scale = r.uniform(0.85, 1.25)                # multiplier on think/read gaps
         self.scroll_speed = r.uniform(0.8, 1.3)
         self.pace = 1.0                                         # live OU multiplier in IKI space
@@ -52,7 +54,6 @@ class Persona:
         """Ornstein-Uhlenbeck random walk in log space; keeps lag-1 autocorrelation human."""
         self._pace_ln = OU_RHO * self._pace_ln + self.rng.gauss(0, OU_SD)
         self.pace = max(0.72, min(1.45, math.exp(self._pace_ln))) * self.fatigue()
-        return self.pace
 
 
 # One persona per process; other modules bind this object at import time.

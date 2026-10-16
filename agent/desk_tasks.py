@@ -10,63 +10,53 @@ Run on the VM:  python desk_tasks.py   (then let go of the mouse)
 import sys
 sys.dont_write_bytecode = True  # no __pycache__/*.pyc from python.exe (EID 11)
 
-import time
-
 import timing
 from content import todo_line
-from human_input import (VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_LWIN, VK_RETURN, VK_SHIFT,
+from human_input import (nap, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_LWIN, VK_RETURN, VK_SHIFT,
                          ensure_focus, find_windows_by_class, focus, foreground, hotkey, hover_in,
-                         scroll, tap, type_text, wait_for_window)
+                         scroll, tap, type_text, wait_for_new_window, wait_for_window)
 from session import run_standalone
 
 EXPLORER = "CabinetWClass"
 
 
-def _new_explorer(before, timeout=10):
-    end = time.time() + timeout
-    while time.time() < end:
-        for hwnd in find_windows_by_class(EXPLORER):
-            if hwnd not in before:
-                return hwnd
-        time.sleep(0.25)
-    raise TimeoutError("File Explorer did not open")
-
-
 def look_over_documents(session):
-    """Win+E, go to Documents, switch view, skim the files saved today, close the window."""
+    """Win+E, go to Documents (or Downloads, once a page was saved from Chrome - its Save As
+    lands there), switch view, skim the files, close the window."""
     rng = session.rng
+    folder = "Downloads" if session.world.downloads and rng.random() < 0.5 else "Documents"
     before = set(find_windows_by_class(EXPLORER))
     hotkey(VK_LWIN, ord("E"))
-    hwnd = _new_explorer(before)
+    hwnd = wait_for_new_window("File Explorer", before, timeout=10, window_class=EXPLORER)
     session.explorers.append(hwnd)
     try:
         focus(hwnd)
-        time.sleep(timing.read_s(6))
+        nap(timing.read_s(6))
         hotkey(VK_CONTROL, ord("L"))                    # address bar
-        time.sleep(timing.short_s(0.4))
+        nap(timing.short_s(0.4))
         # the env-var path resolves on every Windows build/language, unlike a bare "Documents"
-        type_text("%USERPROFILE%\\Documents", wpm=55, typo_rate=0.02, exact=True)
-        time.sleep(timing.short_s(0.3))
+        type_text(f"%USERPROFILE%\\{folder}", speed=0.7, exact=True)
+        nap(timing.short_s(0.3))
         tap(VK_DELETE)                                  # drop an autocompleted tail
         tap(VK_RETURN)
-        wait_for_window("Documents", timeout=10)
-        time.sleep(timing.perceive_s())
+        wait_for_window(folder, timeout=10)
+        nap(timing.perceive_s())
         if rng.random() < 0.6:                          # Details / Large icons view
             ensure_focus(hwnd)
             hotkey(VK_CONTROL, VK_SHIFT, ord(rng.choice("62")))
-            time.sleep(timing.think_s(0.8))
+            nap(timing.think_s(0.8))
         for _ in range(rng.randint(1, 3)):
             hover_in(hwnd, rng.uniform(0.35, 0.8), rng.uniform(0.3, 0.75))
             if rng.random() < 0.5:
                 scroll(rng.choice([-2, -1, 1, 2, 3]))
-            time.sleep(timing.read_s(12))
+            nap(timing.read_s(12))
     finally:
         if foreground() != hwnd:                        # e.g. a "can't find" error box
             tap(VK_ESCAPE)
-            time.sleep(timing.think_s(0.5))
+            nap(timing.think_s(0.5))
         focus(hwnd)
         hotkey(VK_CONTROL, ord("W"))                    # close this Explorer window
-        time.sleep(timing.think_s(0.6))
+        nap(timing.think_s(0.6))
         session.explorers.remove(hwnd)
 
 

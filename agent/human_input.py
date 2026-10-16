@@ -14,14 +14,13 @@ what runs here.
     and verifies it before any keys are sent.
 """
 import ctypes
-import math
-import random
 import time
 from ctypes import wintypes
 
 from persona import PERSONA
 import mouse
 import timing
+from screen import class_name, poll, window_rect
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -29,6 +28,7 @@ dwmapi = ctypes.WinDLL("dwmapi")
 user32.SetProcessDPIAware()
 user32.VkKeyScanW.restype = ctypes.c_short
 user32.GetAsyncKeyState.restype = ctypes.c_short
+user32.GetKeyState.restype = ctypes.c_short
 user32.WindowFromPoint.restype = wintypes.HWND
 user32.WindowFromPoint.argtypes = [wintypes.POINT]
 # HWND-returning calls must not be truncated to a C int on 64-bit Python
@@ -48,6 +48,7 @@ VK_SHIFT, VK_RETURN, VK_BACK, VK_LWIN = 0x10, 0x0D, 0x08, 0x5B
 VK_TAB, VK_CONTROL, VK_HOME, VK_END = 0x09, 0x11, 0x24, 0x23
 VK_MENU, VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_F4 = 0x12, 0x25, 0x27, 0x26, 0x28, 0x73
 VK_DELETE, VK_ESCAPE, VK_INSERT, VK_PRIOR, VK_NEXT = 0x2E, 0x1B, 0x2D, 0x21, 0x22
+VK_CAPITAL, VK_OEM_PLUS, VK_F5 = 0x14, 0xBB, 0x74
 MOUSEEVENTF_WHEEL, WHEEL_DELTA = 0x0800, 120
 ULONG_PTR = ctypes.c_size_t
 
@@ -56,7 +57,7 @@ ULONG_PTR = ctypes.c_size_t
 _EXTENDED = {VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_HOME, VK_END, VK_DELETE, VK_INSERT,
              VK_PRIOR, VK_NEXT, VK_LWIN, 0x5C, 0xA3, 0xA5}
 
-# cached once; GetSystemMetrics per-move is wasteful (resource-efficiency smell)
+# cached once: GetSystemMetrics on every move would be wasteful
 SCREEN_W = user32.GetSystemMetrics(0)
 SCREEN_H = user32.GetSystemMetrics(1)
 
@@ -83,11 +84,31 @@ class INPUT(ctypes.Structure):
     _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
 
 
+_last_evt = -1e9        # perf_counter of the last injected event
+
+
 def _send(inp):
     """Inject one event; raise if the OS dropped it (UIPI / wrong focus)."""
+    global _last_evt
     if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT)) != 1:
         raise OSError(f"SendInput dropped an event (err {ctypes.get_last_error()}); "
                       "target window may be higher-integrity or unfocused")
+    _last_evt = time.perf_counter()
+
+
+def _sleep_until(start, t):
+    """Sleep to absolute deadline start+t (perf_counter), so a plan's sleeps don't drift."""
+    left = t - (time.perf_counter() - start)
+    if left > 0:
+        time.sleep(left)
+
+
+def _flight():
+    """Before a tap or chord: a human release-to-press gap after whatever input came just
+    before (back-to-back taps would otherwise be ~0 ms apart, which no hand does)."""
+    need = timing.flight_s() - (time.perf_counter() - _last_evt)
+    if need > 0:
+        time.sleep(need)
 
 
 def _send_mouse(**fields):
@@ -127,14 +148,33 @@ _MODIFIERS = (VK_LWIN, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5)
 _MASK = 0xE8        # an unassigned VK: tapped while Win/Alt is held, their key-up opens nothing
 
 
+_caps_tapped = False
+
+
+def _caps_off():
+    """Caps Lock is a toggle, so a stale ON (seen before a run starts, or left by a host
+    shortcut) swaps every letter's case: URLs and formulas would come out wrong. Tap it off -
+    once per run, so a stale GetKeyState reading can never flip it back and forth."""
+    global _caps_tapped
+    if not _caps_tapped and user32.GetKeyState(VK_CAPITAL) & 1:
+        _caps_tapped = True
+        print("    Caps Lock was on; tapping it off", flush=True)
+        _flight()
+        _key(VK_CAPITAL)
+        time.sleep(timing.hold_ms(key=VK_CAPITAL) / 1000.0)
+        _key(VK_CAPITAL, up=True)
+        time.sleep(timing.short_s(0.12))
+
+
 def release_stuck():
-    """Let go of any modifier held down by something other than us.
+    """Let go of any modifier held down by something other than us, and Caps Lock if it is on.
 
     Seen on the VM: a host shortcut (Cmd+Shift+5 on the Mac running the noVNC console) left
     Win+Shift held inside Windows, so Ctrl+S became Win+Ctrl+S (Voice access) and Ctrl+V
     became Win+Ctrl+V (Sound output). Called before every chord and typing burst; we never
     hold a modifier ourselves across those calls.
     """
+    _caps_off()
     held = [vk for vk in _MODIFIERS if user32.GetAsyncKeyState(vk) & 0x8000]
     if not held:
         return
@@ -148,24 +188,16 @@ def release_stuck():
 def tap(vk):
     """Press and release one key with a human hold time."""
     release_stuck()
+    _flight()
     _key(vk)
-    time.sleep(max(0.03, timing.hold_ms() / 1000.0))
+    time.sleep(timing.hold_ms(key=vk) / 1000.0)
     _key(vk, up=True)
-
-
-def _resolve(c):
-    """Map a character to (vk, needs_shift, is_unicode). vk is None for unicode packets."""
-    if c == "\n":
-        return VK_RETURN, False, False
-    r = user32.VkKeyScanW(ord(c))
-    if r == -1:
-        return None, False, True
-    return r & 0xFF, bool((r >> 8) & 1), False
 
 
 def hotkey(*vks):
     """Chord: press in order, release in reverse. try/finally guarantees no stuck modifier."""
     release_stuck()
+    _flight()
     pressed = []
     try:
         for vk in vks:
@@ -176,6 +208,23 @@ def hotkey(*vks):
         for vk in reversed(pressed):
             _key(vk, up=True)
             time.sleep(timing.short_s(0.035))
+
+
+def hold_chord(mod, vk, count):
+    """Hold a modifier and tap `vk` `count` times (Shift+Down x4 grows a Calc selection by four
+    rows), as a hand does: the modifier stays down between the presses."""
+    release_stuck()
+    _flight()
+    _key(mod)
+    try:
+        for i in range(count):
+            time.sleep(timing.short_s(0.13 if i else 0.065))
+            _key(vk)
+            time.sleep(timing.hold_ms(key=vk) / 1000.0)
+            _key(vk, up=True)
+    finally:
+        _key(mod, up=True)
+        time.sleep(timing.short_s(0.035))
 
 
 def hold_key(vk, count):
@@ -193,36 +242,40 @@ def hold_key(vk, count):
     _key(vk, up=True)
 
 
-def type_text(text, wpm=None, typo_rate=None, exact=False):
+def type_text(text, speed=None, typo_rate=None, exact=False, revise=False):
     """Type `text` from an event-timeline plan, giving real rollover and matched WPM.
 
-    `wpm` / `typo_rate` temporarily bias this burst (e.g. fast+no-typos for the Run dialog
-    or Calc numbers) while keeping the persona's live pace/fatigue state. `exact` makes
-    every typo get corrected - use it for URLs, filenames and cell values, which must land
-    verbatim.
+    `speed` scales this burst relative to the persona's own pace (e.g. 0.75 for a filename
+    read off the screen, 1.1 for a command typed from memory), keeping its live pace and
+    fatigue. `typo_rate` overrides the persona's error rate. `exact` makes every typo get
+    corrected - use it for URLs, filenames and cell values, which must land verbatim.
+    `revise` allows the odd false start erased with Ctrl+Backspace (prose in Writer only).
     """
     saved_iki, saved_err = PERSONA.iki_ms, PERSONA.error_rate
-    if wpm:
-        PERSONA.iki_ms = 60000.0 / (wpm * 5)
+    if speed:
+        PERSONA.iki_ms /= speed
     if typo_rate is not None:
         PERSONA.error_rate = typo_rate
     try:
-        strokes = timing.plan_typing(text, PERSONA, exact=exact)
+        strokes = timing.plan_typing(text, PERSONA, exact=exact, revise=revise)
     finally:
         PERSONA.iki_ms, PERSONA.error_rate = saved_iki, saved_err
     _run_key_timeline(strokes)
 
 
 def _stroke_key(s):
-    """(key id, needs_shift, needs_ctrl) for a planned stroke; see timing.schedule_keys."""
+    """(key id, needs_shift, needs_ctrl) for a planned stroke; see timing.schedule_keys.
+    A character no key produces goes out as a Unicode packet (needs_shift None)."""
     if s.action == "back":
         return ("vk", VK_BACK), False, False
     if s.action == "ctrl_back":
         return ("vk", VK_BACK), False, True
-    vk, shift, uni = _resolve(s.data)
-    if uni:
+    if s.data == "\n":
+        return ("vk", VK_RETURN), False, False
+    r = user32.VkKeyScanW(ord(s.data))
+    if r == -1:
         return ("u", s.data), None, False
-    return ("vk", vk), shift, False
+    return ("vk", r & 0xFF), bool((r >> 8) & 1), False
 
 
 def _run_key_timeline(strokes):
@@ -230,13 +283,14 @@ def _run_key_timeline(strokes):
     events = timing.schedule_keys(strokes, _stroke_key, ("vk", VK_SHIFT), ("vk", VK_CONTROL),
                                   PERSONA.rng)
     release_stuck()
+    check_operator()
     down = set()
     start = time.perf_counter()
     try:
-        for t, up, (kind, k) in events:
-            dt = t - (time.perf_counter() - start)
-            if dt > 0:
-                time.sleep(dt)
+        for i, (t, up, (kind, k)) in enumerate(events):
+            if i % 16 == 15:
+                check_operator(down)                    # GetCursorPos: cheap, and we never move it here
+            _sleep_until(start, t)
             if kind == "u":
                 _unicode(k, up=up)
             else:
@@ -256,12 +310,19 @@ def _run_key_timeline(strokes):
 # ---------- mouse ----------
 
 class OperatorAbort(BaseException):
-    """A person grabbed the mouse. BaseException so per-task `except Exception` handlers
-    don't swallow it: the agent stops and hands the desktop back."""
+    """The operator asked us to stop (mouse parked in the top-left corner). BaseException so
+    per-task `except Exception` handlers don't swallow it: the agent stops for good."""
+
+
+class Interrupted(Exception):
+    """Someone used the mouse mid-task. We waited until they let go; the task in hand is
+    abandoned (focus may have moved) and the day carries on."""
 
 
 _expected = None        # where we last put the cursor; None until our first move
 _TAKEOVER_PX = 40
+_STILL_S = 8.0          # hand back after the mouse has been left alone this long
+_CORNER_PX, _CORNER_S = 3, 2.0
 
 
 def cursor_pos():
@@ -270,14 +331,56 @@ def cursor_pos():
     return pt.x, pt.y
 
 
-def check_operator():
-    """Raise OperatorAbort if the cursor is far from where we left it - someone moved the
-    real mouse. Under pythonw there is no console to Ctrl+C, so this is the stop button."""
+def _wait_for_release():
+    """Someone else has the mouse: keep our hands off until it has been still for _STILL_S.
+    Parking it in the top-left corner for _CORNER_S is the stop button (OperatorAbort)."""
+    global _expected
+    last, still_since, corner_since = cursor_pos(), time.time(), None
+    while True:
+        time.sleep(0.25)
+        p, now = cursor_pos(), time.time()
+        if p[0] <= _CORNER_PX and p[1] <= _CORNER_PX:
+            corner_since = corner_since or now
+            if now - corner_since >= _CORNER_S:
+                raise OperatorAbort("mouse parked in the top-left corner")
+        else:
+            corner_since = None
+        if p != last:
+            last, still_since = p, now
+        elif corner_since is None and now - still_since >= _STILL_S:
+            _expected = p
+            return
+
+
+def check_operator(held=None):
+    """If the cursor is far from where we left it, a person is using the mouse (a judge in
+    Process Explorer, a noVNC pointer): wait until they let go, then raise Interrupted so the
+    task in hand is cleaned up rather than typed into whatever they focused. Under pythonw
+    there is no console to Ctrl+C: the top-left corner park is the stop button. Keys in `held`
+    are released first, so the person isn't shift-clicking for the whole wait."""
     if _expected is None:
         return
     x, y = cursor_pos()
     if abs(x - _expected[0]) > _TAKEOVER_PX or abs(y - _expected[1]) > _TAKEOVER_PX:
-        raise OperatorAbort(f"mouse moved by someone else to {(x, y)}")
+        print(f"    mouse moved by someone else to {(x, y)}; waiting until it is left alone",
+              flush=True)
+        for k in list(held or ()):
+            _key(k, up=True)
+            held.discard(k)
+        _wait_for_release()
+        raise Interrupted(f"mouse taken over at {(x, y)}")
+
+
+def nap(seconds):
+    """time.sleep that keeps an eye on the mouse (checks ~2x/s), for every pause longer than
+    a motor gap: reading, thinking, breaks."""
+    end = time.time() + seconds
+    while True:
+        check_operator()
+        left = end - time.time()
+        if left <= 0:
+            return
+        time.sleep(min(0.5, left))
 
 
 def _move_abs(x, y):
@@ -297,19 +400,15 @@ def move_to(x, y):
     """
     check_operator()
     x0, y0 = cursor_pos()
+    start, t = time.perf_counter(), 0.0
     for dt, mx, my in mouse.plan_move(x0, y0, x, y, PERSONA):
         _move_abs(mx, my)
-        time.sleep(dt)
+        t += dt
+        _sleep_until(start, t)
 
 
 _CONSOLE_CLASSES = {"ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS"}  # conhost, Win11 Terminal
 GA_ROOT = 2
-
-
-def _class_name(hwnd):
-    buf = ctypes.create_unicode_buffer(64)
-    user32.GetClassNameW(hwnd, buf, 64)
-    return buf.value
 
 
 def _at_console():
@@ -318,7 +417,7 @@ def _at_console():
     try:
         root = user32.GetAncestor(user32.WindowFromPoint(wintypes.POINT(*cursor_pos())), GA_ROOT)
         own = kernel32.GetConsoleWindow()
-        return bool(root) and (root == own or _class_name(root) in _CONSOLE_CLASSES)
+        return bool(root) and (root == own or class_name(root) in _CONSOLE_CLASSES)
     except Exception:
         return False
 
@@ -329,9 +428,9 @@ def click():
     if _at_console():
         return  # guard: a click here would toggle QuickEdit and suspend the agent
     _send_mouse(dwFlags=MOUSEEVENTF_LEFTDOWN)
-    time.sleep(max(0.04, timing.hold_ms() / 1000.0))
-    if random.random() < 0.5:                           # 1 px drift between down and up
-        _move_abs(*[c + random.choice((-1, 1)) for c in cursor_pos()])
+    time.sleep(timing.click_hold_ms() / 1000.0)
+    if PERSONA.rng.random() < 0.5:                      # 1 px drift between down and up
+        _move_abs(*[c + PERSONA.rng.choice((-1, 1)) for c in cursor_pos()])
     _send_mouse(dwFlags=MOUSEEVENTF_LEFTUP)
 
 
@@ -343,11 +442,17 @@ def double_click():
 
 
 def scroll(notches):
-    """Wheel scroll one notch at a time (positive = down), with lognormal gaps."""
-    step = -WHEEL_DELTA if notches > 0 else WHEEL_DELTA
-    for _ in range(abs(notches)):
+    """Wheel-scroll about `notches` ticks (positive = down) as flicks: see timing.plan_scroll."""
+    if not notches:
+        return
+    release_stuck()                                     # Shift held would scroll sideways
+    check_operator()
+    start, t = time.perf_counter(), 0.0
+    for dt, d in timing.plan_scroll(notches, PERSONA):
+        t += dt
+        _sleep_until(start, t)
+        step = -WHEEL_DELTA if d > 0 else WHEEL_DELTA
         _send_mouse(mouseData=ctypes.c_uint32(step).value, dwFlags=MOUSEEVENTF_WHEEL)
-        time.sleep(random.lognormvariate(math.log(0.065 / PERSONA.scroll_speed), 0.5))
 
 
 # ---------- windows ----------
@@ -381,7 +486,7 @@ def find_windows(title_part, exact=False):
 
 def find_windows_by_class(cls):
     """Visible top-level windows of a window class (e.g. 'CabinetWClass' = File Explorer)."""
-    return _top_windows(lambda hwnd: _class_name(hwnd) == cls)
+    return _top_windows(lambda hwnd: class_name(hwnd) == cls)
 
 
 def find_window(title_part, exact=False):
@@ -413,19 +518,8 @@ def _alt_tab_order():
     return _top_windows(switchable)
 
 
-def _poll(fn, timeout, interval=0.25):
-    """Call fn until it returns something truthy (returned) or `timeout` s pass (None)."""
-    end = time.time() + timeout
-    while time.time() < end:
-        result = fn()
-        if result:
-            return result
-        time.sleep(interval)
-    return None
-
-
 def _wait_foreground(hwnd, timeout):
-    return bool(_poll(lambda: foreground() == hwnd, timeout, 0.05))
+    return bool(poll(lambda: foreground() == hwnd, timeout, 0.05))
 
 
 def focus(hwnd):
@@ -446,7 +540,7 @@ def focus(hwnd):
     if len(order) > 1 and order[0] == foreground() and order[1] == hwnd:
         hotkey(VK_MENU, VK_TAB)
         if _wait_foreground(hwnd, 1.5):
-            time.sleep(timing.perceive_s())
+            nap(timing.perceive_s())
             return
     fg = foreground()
     me = kernel32.GetCurrentThreadId()
@@ -460,7 +554,7 @@ def focus(hwnd):
             user32.AttachThreadInput(me, them, False)
     if not _wait_foreground(hwnd, 2.0):
         raise RuntimeError(f"focus: could not bring {window_title(hwnd)!r} to the front")
-    time.sleep(timing.perceive_s())
+    nap(timing.perceive_s())
 
 
 def maximize(hwnd):
@@ -471,8 +565,8 @@ def maximize(hwnd):
     if user32.IsZoomed(hwnd):
         return
     hotkey(VK_LWIN, VK_UP)
-    _poll(lambda: user32.IsZoomed(hwnd), 2.0, 0.1)
-    time.sleep(timing.perceive_s())
+    poll(lambda: user32.IsZoomed(hwnd), 2.0, 0.1)
+    nap(timing.perceive_s())
 
 
 def ensure_focus(hwnd):
@@ -488,13 +582,20 @@ def window_title(hwnd):
     return buf.value
 
 
-def wait_for_new_window(title_part, before, timeout=40):
-    """Poll until a window matching title_part appears that was not in `before` (a set)."""
-    hwnd = _poll(lambda: next((h for h in find_windows(title_part) if h not in before), None),
-                 timeout)
+def wait_for_new_window(title_part, before, timeout=40, window_class=None):
+    """Poll until a window matching title_part (or, if given, of `window_class`) appears that
+    was not in `before` (a set)."""
+    find = (lambda: find_windows_by_class(window_class)) if window_class \
+        else (lambda: find_windows(title_part))
+    hwnd = poll(lambda: next((h for h in find() if h not in before), None), timeout)
     if not hwnd:
         raise TimeoutError(f"no new window: {title_part!r}")
     return hwnd
+
+
+def wait_title(hwnd, pred, timeout):
+    """True once pred(title of hwnd) holds, checked once more at the deadline."""
+    return bool(poll(lambda: pred(window_title(hwnd)), timeout, last_try=True))
 
 
 def wait_for_window(title_part, timeout=20, gone=False, exact=False):
@@ -503,7 +604,7 @@ def wait_for_window(title_part, timeout=20, gone=False, exact=False):
         hwnd = find_window(title_part, exact)
         return not hwnd if gone else hwnd
 
-    result = _poll(check, timeout)
+    result = poll(check, timeout)
     if not result:
         raise TimeoutError(f"window {'still open' if gone else 'not found'}: {title_part!r}")
     return None if gone else result
@@ -511,16 +612,15 @@ def wait_for_window(title_part, timeout=20, gone=False, exact=False):
 
 def hover_in(hwnd, fx, fy):
     """Move to a point at fractions (fx, fy) of the window's rect, with noise."""
-    r = wintypes.RECT()
-    user32.GetWindowRect(hwnd, ctypes.byref(r))
-    x = r.left + (r.right - r.left) * fx + random.gauss(0, 8)
-    y = r.top + (r.bottom - r.top) * fy + random.gauss(0, 8)
+    l, t, r, b = window_rect(hwnd)
+    x = l + (r - l) * fx + PERSONA.rng.gauss(0, 8)
+    y = t + (b - t) * fy + PERSONA.rng.gauss(0, 8)
     move_to(int(x), int(y))
 
 
 def click_in(hwnd, fx, fy):
     hover_in(hwnd, fx, fy)
-    time.sleep(timing.think_s(0.3))
+    nap(timing.think_s(0.3))
     click()
 
 
@@ -535,7 +635,7 @@ def launch(command):
     run = wait_for_window("Run", timeout=5, exact=True)
     ensure_focus(run)
     time.sleep(timing.short_s(0.6))
-    type_text(command, wpm=70, typo_rate=0, exact=True)
+    type_text(command, speed=1.1, typo_rate=PERSONA.error_rate * 0.5, exact=True)
     time.sleep(timing.short_s(0.33))
     tap(VK_DELETE)                                      # drop any AutoComplete tail
     time.sleep(timing.short_s(0.33))
@@ -551,8 +651,7 @@ def idle(seconds):
         left = end - time.time()
         if left <= 0:
             break
-        time.sleep(min(left, timing.think_s(12.0)))
-        check_operator()
+        nap(min(left, timing.think_s(12.0)))
         if end - time.time() > 2 and rng.random() < 0.35:
             x, y = cursor_pos()
             move_to(x + rng.gauss(0, 40), y + rng.gauss(0, 30))

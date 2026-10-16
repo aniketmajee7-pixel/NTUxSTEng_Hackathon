@@ -21,11 +21,13 @@ from decimal import ROUND_HALF_UP, Decimal
 
 import screen
 import timing
-from content import sentence, world_sentence
-from human_input import VK_CONTROL, VK_DOWN, VK_END, VK_HOME, click_in, ensure_focus, focus, hotkey, tap
-from office_loop import check_cell, enter_cell, goto_cell, move_cursor, new_sheet, type_paragraph
-from session import run_standalone, stamped
-from web_loop import copy_a_word, glance, read_page, try_a_link
+from content import fresh, world_sentence
+from human_input import (nap, VK_CONTROL, VK_DOWN, VK_END, VK_HOME, click_in, ensure_focus, focus,
+                         hotkey, tap, type_text)
+from office_loop import (check_cell, enter_cells, enter_row, goto_cell, move_cursor, new_sheet,
+                         new_writer, paste_down, type_paragraph)
+from session import run_standalone
+from web_loop import copy_a_word, glance, page_extra, read_page, save_page, try_a_link
 
 # Approximate SGD list prices, used as what the "researcher" noted on each site.
 CATALOGUE = {
@@ -56,31 +58,84 @@ def pick_findings(rng, shops=None):
     return findings
 
 
+BUDGETS = [1200, 1500, 1800, 2000]
+MANAGERS = ["Rachel", "Kenneth", "Farah", "Hui Min", "Marcus", "Siti"]   # none is a WorldState name
+BOLD_LABEL = "Recommendation:"
+
+
+def pick_budget(rng, findings):
+    """Chosen after the findings, so the memo has something to recommend: any budget that at
+    least two models fit under, else the biggest."""
+    roomy = [b for b in BUDGETS if sum(1 for f in findings if f[2] <= b) >= 2]
+    return rng.choice(roomy) if roomy else max(BUDGETS)
+
+
+def _and(names):
+    return ", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else names[0]
+
+
+def _memo_lines(findings, budget, shops):
+    """On-topic filler for the email: what a shopper would say about quotes, delivery,
+    warranty and the shortlist."""
+    direct = [s for s in shops if s != "AliExpress"]
+    lines = ["The prices are the ones listed on each site today, so I would ask for a corporate "
+             "quote before we order.",
+             f"I kept the shortlist to {len(findings)} models and left anything above "
+             f"{money(budget)} out of the running.",
+             f"The comparison sheet uses the {money(budget)} budget in cell F1, so the Yes/No "
+             f"column moves if that changes."]
+    if "AliExpress" in shops:
+        lines.append("Delivery is about 3 to 5 working days from the brand shops and nearer two "
+                     "weeks from AliExpress.")
+        if direct:
+            lines.append(f"Warranty is simpler to claim on the {_and(direct)} orders, as AliExpress "
+                         f"sellers would mean posting the unit back.")
+    else:
+        lines.append("Delivery is about 3 to 5 working days from all of the shops.")
+        lines.append("Every model is listed with at least a one-year warranty.")
+    return lines
+
+
 def recommendation_text(session, findings, budget):
+    """The memo as an email draft to finance, as a list of paragraphs."""
     w = session.world
     rng = session.rng
+    manager = rng.choice(MANAGERS)
     within = sorted((f for f in findings if f[2] <= budget), key=lambda f: f[2])
     cheapest = min(findings, key=lambda f: f[2])
-    shops = ", ".join(w.visited) if w.visited else "the usual shops"
-    paras = [f"Laptop shortlist - {time.strftime('%d %b %Y')}",
-             f"Budget: {money(budget)}. I compared {len(findings)} models across {shops}. "
-             f"{len(within)} of them are within budget. The cheapest overall is the {cheapest[1]} "
-             f"from {cheapest[0]} at {money(cheapest[2])}."]
-    voice = [sentence(rng)]                             # a line in the worker's own voice
-    grounded = world_sentence(w, rng)
+    shops = _and(list(dict.fromkeys(w.visited))) if w.visited else "the usual shops"
+    n = len(within)
+    count = f"{n} of them {'is' if n == 1 else 'are'}" if n else "None of them is"
+    paras = [f"To: {manager} (Finance)\nSubject: Laptop shortlist - {time.strftime('%d %b %Y')}",
+             f"Hi {manager},",
+             f"I compared {len(findings)} models across {shops} against the {money(budget)} "
+             f"budget. {count} within it. The cheapest overall is the {cheapest[1]} from "
+             f"{cheapest[0]} at {money(cheapest[2])}."]
+    extra = rng.sample(_memo_lines(findings, budget, list(dict.fromkeys(f[0] for f in findings))), 2)
+    grounded = fresh(lambda: world_sentence(w, rng), set(extra))
     if grounded:
-        voice.append(grounded)
-    paras.append(" ".join(voice))
+        extra.append(grounded)
+    paras.append(" ".join(extra))
     if within:
         pick = within[-1]                               # most expensive that still fits = best spec
-        paras.append(f"Recommendation: the {pick[1]} ({pick[0]}, {money(pick[2])}). It is the "
-                     f"strongest option that still fits the budget.\n"
-                     f"Backup option: the {within[0][1]} at {money(within[0][2])} if we want to "
-                     f"save more.")
+        text = (f"{BOLD_LABEL} the {pick[1]} ({pick[0]}, {money(pick[2])}). It is the "
+                f"strongest option that still fits the budget.")
+        if len(within) >= 2:                            # next-best that fits, never the pick itself
+            backup = within[-2]
+            text += (f"\nBackup option: the {backup[1]} ({backup[0]}, {money(backup[2])}), also "
+                     f"within budget, in case the {pick[1]} is not available.")
+        paras.append(text)
     else:
-        paras.append("Nothing fits the budget, so we either raise it or wait for a promotion.")
-    paras.append("Next steps: confirm the budget with finance and check delivery times before "
-                 "ordering.")
+        paras.append(f"Nothing fits the {money(budget)} budget, so we either raise it or wait for "
+                     f"a promotion.")
+    paras.append(rng.choice([
+        "Next steps: if you are happy with this, I will confirm delivery times and place the "
+        "order next week.",
+        "Next steps: let me know if the budget is fine and I will get a final quote from the "
+        "vendor before ordering.",
+        "Next steps: once you have signed off I will check delivery times and raise the "
+        "purchase request."]))
+    paras.append(f"Thanks,\n{w.name}")
     return paras
 
 
@@ -99,48 +154,52 @@ def visit_shop(session, research, shop):
         session.note(f"{shop}: site wouldn't load, skip")
         return
     session.world.visit(shop)
-    read_page(hwnd, rng, bursts=(2, 4))
+    read_page(hwnd, rng)
+    page_extra(hwnd, rng)
     if rng.random() < 0.5:
         try_a_link(hwnd, rng)
-    word = copy_a_word(hwnd, rng) if rng.random() < 0.7 else None
+    word = copy_a_word(hwnd, rng, reject=(shop, SHOP_SITES[shop])) if rng.random() < 0.7 else None
     models = ", ".join(f"{m.replace(shop + ' ', '')} {p:,}" for s, m, p in research.findings
                        if s == shop)
-    time.sleep(timing.read_s(12))                       # "noting down" the models seen
+    nap(timing.read_s(12))                       # "noting down" the models seen
     if word:
         session.world.terms[shop] = word
-        # Chrome's double-click selection often carries a trailing space; don't double it
-        sep = "" if screen.clipboard_text().endswith((" ", "\t")) else " "
-        session.note(f"{shop}: ", paste=True, after=f"{sep}is all over their homepage. {models}")
+        # Chrome's double-click selection often carries a trailing space: Backspace it away
+        # so it doesn't end up inside the quotes
+        clip = screen.clipboard_text()
+        session.note(f'{shop}: noticed "', paste=True, trim=len(clip) - len(clip.rstrip()),
+                     after=f'" on their homepage. {models}')
     else:
         session.note(f"{shop}: {models}")
+    if not session.page_saved and rng.random() < 0.35:
+        save_page(session, hwnd, shop)                  # "keep a copy of this one"
     if session.tabs > 3 and rng.random() < 0.6:
         session.close_tab()
 
 
 def _rows(session, hwnd, findings, first_row):
+    """Type the shortlist rows. Usually (p~0.7, two or more rows) the Within-budget formula is
+    typed in the first row only and pasted into the rest."""
+    paste = len(findings) >= 2 and session.rng.random() < 0.7
     for row, (shop, model, price) in enumerate(findings, start=first_row):
-        if session.calc_grid and session.rng.random() < 0.5:   # click the row's first cell
-            goto_cell(session, hwnd, 0, row - 1)
-        for v in (shop, model, str(price)):
-            enter_cell(hwnd, v)
         # AOO uses ';' as the function argument separator
-        enter_cell(hwnd, f'=IF(C{row}<=$F$1;"Yes";"No")', last=True)
+        enter_row(session, hwnd, row, (shop, model, str(price)), f'=IF(C{row}<=$F$1;"Yes";"No")',
+                  fill=paste and row > first_row)
+    if paste:
+        paste_down(session, hwnd, 3, first_row, first_row + 1, first_row + len(findings) - 1)
 
 
 def start_sheet(session, research):
     """New comparison sheet with the shops noted so far; saved, then closed."""
     rng = session.rng
     hwnd = new_sheet(session)
-    for i, v in enumerate(("Shop", "Model", "Price (SGD)", "Within budget", "Budget",
-                           str(research.budget))):
-        enter_cell(hwnd, v, last=(i == 5))
+    enter_cells(hwnd, "Shop", "Model", "Price (SGD)", "Within budget", "Budget", str(research.budget))
     rows = [f for f in research.findings if f[0] in session.world.visited]
     _rows(session, hwnd, rows, 2)
     if rng.random() < 0.5:
-        time.sleep(timing.read_s(20))                   # double-check against the notes
-    name = stamped("Laptop comparison")
-    time.sleep(timing.read_s(15))
-    session.save_doc_as(name)
+        nap(timing.read_s(20))                   # double-check against the notes
+    nap(timing.read_s(15))
+    name = session.save_doc_as(session.stamped("Laptop comparison"))   # may gain a suffix
     # only once it is on disk: a failed save (recovered as a Draft) must not send
     # finish_sheet after a file that doesn't exist
     research.sheet_rows = rows
@@ -154,14 +213,14 @@ def finish_sheet(session, research):
     rest = [f for f in research.findings if f not in research.sheet_rows]
     first = len(research.sheet_rows) + 2
     if session.calc_grid:
-        time.sleep(timing.perceive_s())
+        nap(timing.perceive_s())
         goto_cell(session, hwnd, 0, first - 1, home=True)  # the first empty row's A cell
     else:
         click_in(hwnd, 0.3, 0.45)
-        time.sleep(timing.perceive_s())
+        nap(timing.perceive_s())
         ensure_focus(hwnd)
         hotkey(VK_CONTROL, VK_END)                      # last used cell: F of the last data row
-        time.sleep(timing.short_s(0.3))
+        nap(timing.short_s(0.3))
         tap(VK_DOWN)
         tap(VK_HOME)                                    # first empty row, column A
     _rows(session, hwnd, rest, first)
@@ -171,10 +230,8 @@ def finish_sheet(session, research):
     avg = int(Decimal(sum(prices) / len(prices)).quantize(Decimal(1), rounding=ROUND_HALF_UP))
     f_min, f_avg = f"=MIN(C2:C{last})", f"=ROUND(AVERAGE(C2:C{last});0)"
     for label, formula in (("Cheapest", f_min), ("Average", f_avg)):
-        enter_cell(hwnd, label)
-        enter_cell(hwnd, "")
-        enter_cell(hwnd, formula, last=True)
-    time.sleep(timing.read_s(15))
+        enter_cells(hwnd, label, "", formula)
+    nap(timing.read_s(15))
     if session.calc_grid:                               # the MIN cell: C{last + 1}
         goto_cell(session, hwnd, 2, last)
     else:
@@ -182,26 +239,37 @@ def finish_sheet(session, research):
     check_cell(session, hwnd, lo, f_min, tol=0.5)
     tap(VK_DOWN)
     check_cell(session, hwnd, avg, f_avg, tol=0.5)
-    time.sleep(timing.read_s(10))
+    nap(timing.read_s(10))
     ensure_focus(hwnd)
     hotkey(VK_CONTROL, ord("S"))                        # already .ods: saves in place, no dialog
-    time.sleep(timing.think_s(1.0))
+    nap(timing.think_s(1.0))
     session.close_doc()
+
+
+def bold_label_paragraph(hwnd, para):
+    """A paragraph whose leading label is bold: Ctrl+B (a toggle) around the label only."""
+    ensure_focus(hwnd)
+    hotkey(VK_CONTROL, ord("B"))
+    type_text(BOLD_LABEL, exact=True)
+    hotkey(VK_CONTROL, ord("B"))
+    type_text(para[len(BOLD_LABEL):], revise=True)
+    type_text("\n\n")
 
 
 def write_memo(session, research):
     rng = session.rng
-    hwnd = session.new_doc("writer")
-    click_in(hwnd, rng.uniform(0.35, 0.6), rng.uniform(0.35, 0.5))
-    time.sleep(timing.perceive_s())
+    hwnd = new_writer(session)
     paras = recommendation_text(session, research.findings, research.budget)
     for i, para in enumerate(paras):
-        type_paragraph(hwnd, [para], rng)               # single block: typed, not rewritten
-        time.sleep(timing.read_s(15))
-        if i == 1 and rng.random() < 0.5:               # "let me just check that site again"
+        if para.startswith(BOLD_LABEL):
+            bold_label_paragraph(hwnd, para)
+        else:
+            type_paragraph(hwnd, [para], rng)           # single block: typed, not rewritten
+        nap(timing.read_s(15))
+        if i == 2 and rng.random() < 0.5:               # "let me just check that site again"
             glance(session, rng)
             focus(hwnd)
-    session.save_doc_as(stamped("Laptop recommendation"))
+    session.save_doc_as(session.stamped("Email draft - laptop shortlist"))
     session.close_doc()
 
 
@@ -216,9 +284,9 @@ class Research:
     def __init__(self, session):
         rng = session.rng
         self.s = session
-        self.budget = rng.choice([1200, 1500, 1800, 2000])
         self.shops = rng.sample(list(SHOP_SITES), 3)      # which 3 shops varies per run
         self.findings = pick_findings(rng, self.shops)
+        self.budget = pick_budget(rng, self.findings)
         session.world.budget = self.budget
         for f in self.findings:
             session.world.note(*f)
@@ -232,19 +300,26 @@ class Research:
 
     def ready(self):
         """Steps whose dependencies are met: [(name, fn)]."""
-        visited = [s for s in self.shops if self._done("visit:" + s)]
+        tried = [s for s in self.shops if self._done("visit:" + s)]
+        noted = [s for s in tried if s in self.s.world.visited]  # a visit given up on isn't
         out = [("visit:" + s, lambda s=s: visit_shop(self.s, self, s))
                for s in self.shops if not self._done("visit:" + s)][:2]  # next two in shop order
-        if len(visited) >= 2 and not self._done("start_sheet"):
+        all_seen = len(tried) == len(self.shops)
+        if self._done("start_sheet") and not self.sheet:
+            self.done_steps.add("finish_sheet")         # the sheet was given up on: nothing to finish
+        if all_seen:            # the sheet and memo cover only shops actually looked at
+            self.findings = [f for f in self.findings if f[0] in noted]
+            if not noted:       # nothing loaded all day: no comparison to write up
+                self.done_steps |= {"start_sheet", "finish_sheet", "memo"}
+        if (len(noted) >= 2 or all_seen and noted) and not self._done("start_sheet"):
             out.append(("start_sheet", lambda: start_sheet(self.s, self)))
-        all_seen = len(visited) == len(self.shops)
         if all_seen and self.sheet and not self._done("finish_sheet"):
             out.append(("finish_sheet", lambda: finish_sheet(self.s, self)))
         if all_seen and self._done("start_sheet") and (self._done("finish_sheet") or not self.sheet) \
                 and not self._done("memo"):
             out.append(("memo", lambda: write_memo(self.s, self)))
         if all_seen and not self._done("notes"):
-            out.append(("notes", lambda: self.s.save_notes(stamped("Laptop notes"))))
+            out.append(("notes", lambda: self.s.save_notes(self.s.stamped("Laptop notes"))))
         return out
 
     def remaining_est(self):
@@ -264,7 +339,10 @@ def research_task(session):
     """Standalone: run the whole goal in a natural order with short breaks between steps."""
     r = Research(session)
     while not r.done():
-        name, fn = r.ready()[0]
+        ready = r.ready()
+        if not ready:                                   # a step was given up on: nothing left to do
+            break
+        name, fn = ready[0]
         t0 = time.time()
         try:
             r.run_step(name, fn)
@@ -272,7 +350,7 @@ def research_task(session):
         except Exception as e:
             print(f"  {name} failed: {e}", flush=True)
             session.recover()
-        time.sleep(timing.break_s(5, 15))
+        nap(timing.break_s(5, 15))
 
 
 if __name__ == "__main__":

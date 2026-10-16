@@ -12,7 +12,9 @@ Not a fixed storyline (a replayed order is itself a fingerprint, "Known By Their
 Run on the VM (prefer no console - see README):
     double-click agent.pyw            # pythonw, parent explorer.exe, no console window
     python -B agent.py                # with a console, for debugging
-Moving the real mouse stops the agent (OperatorAbort). Progress goes to stdout only (none
+Moving the real mouse pauses the agent: it waits until the mouse has been left alone for a
+few seconds, abandons (saves) the task in hand and carries on. To stop it, park the pointer
+in the top-left screen corner for 2 s (OperatorAbort). Progress goes to stdout only (none
 under pythonw); nothing is written to disk by python.
 """
 import sys
@@ -56,6 +58,14 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def recover(session):
+    """Save + close the half-done doc; a failing recovery must not end the day either."""
+    try:
+        session.recover()
+    except Exception as e:
+        log(f"recovery failed too ({e}); carrying on")
+
+
 def run(name, fn, session):
     """Run one task; on failure clean up and carry on, as a person would."""
     started = time.time()
@@ -66,10 +76,7 @@ def run(name, fn, session):
     except Exception:                                   # OperatorAbort is a BaseException: passes through
         status = "failed"
         traceback.print_exc()
-        try:
-            session.recover()                           # save + close the half-done doc
-        except Exception as e:
-            log(f"recovery failed too ({e}); carrying on")
+        recover(session)
     print(f"    {status} in {time.time() - started:.0f}s", flush=True)
 
 
@@ -84,10 +91,13 @@ class Workday:
         self.last = None
 
     def _ambient(self, slack):
+        # idle always fits (its length is capped by the slack); never two to-dos in a row,
+        # which is what the end of a tight day used to collapse into
         weights = [(k, w) for k, w in TRANSITIONS[self.last]
-                   if (k != "impress" or ENABLE_IMPRESS) and AMBIENT_EST[k] < max(slack, 30)]
-        if not weights:
-            weights = [("todo", 1)]
+                   if (k != "impress" or ENABLE_IMPRESS) and (k == "idle" or AMBIENT_EST[k] < max(slack, 30))
+                   and not (k == "todo" and self.last == "todo")]
+        if not any(k == "idle" for k, _ in weights):
+            weights.append(("idle", 1))
         kinds, ws = zip(*weights)
         return self.rng.choices(kinds, ws)[0]
 
@@ -96,7 +106,10 @@ class Workday:
         now = time.time()
         goal_done = self.goal.done()
         # deadline is always past the floor, so the day never ends before RUN_MINUTES
-        if (goal_done and now >= self.deadline) or now >= self.deadline + HARD_STOP_MINUTES * 60:
+        if goal_done and now >= self.deadline:
+            return False
+        if now >= self.deadline + HARD_STOP_MINUTES * 60:
+            log("hard stop: the goal is unfinished, ending the day anyway")
             return False
         slack = self.deadline - now - self.goal.remaining_est() * 1.15
         ready = self.goal.ready()
@@ -110,7 +123,7 @@ class Workday:
             self.last = kind
             if kind == "idle":
                 log("idle")
-                idle(timing.break_s(30, 120))
+                idle(min(timing.break_s(30, 120), max(10.0, slack)))
                 return True
             run(kind, lambda: AMBIENT[kind](self.s), self.s)
             gap = timing.break_s(8, 35)
@@ -124,14 +137,26 @@ def main(console=True):
     if sys.version_info < (3, 11):
         log(f"WARNING: Python {sys.version.split()[0]} quantizes time.sleep to ~15.6 ms; "
             "keystroke/mouse intervals may show a comb pattern. Prefer >= 3.11.")
-    log("Starting in 5s - let go of the mouse (move it later to stop the agent).")
+    log("Starting in 5s - let go of the mouse (park it in the top-left corner to stop).")
     time.sleep(5)
     session = Session()
     day = Workday(session)
     try:
-        while day.step():
-            pass
-        session.shutdown()
+        while True:
+            try:
+                if not day.step():
+                    break
+            except Exception:                           # e.g. Interrupted during a break
+                traceback.print_exc()
+                recover(session)
+                time.sleep(5)                           # never spin on a failure
+        for _ in range(2):
+            try:
+                session.shutdown()
+                break
+            except Exception:
+                traceback.print_exc()
+                time.sleep(2)
         log("Session complete.")
     except OperatorAbort as e:
         log(f"Stopped: {e}. Leaving the desktop as it is.")

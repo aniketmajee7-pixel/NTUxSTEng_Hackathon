@@ -8,6 +8,7 @@ what is on it:
   * `consent_button` - the accept button of a cookie-consent modal.
   * `warning_button` - the filled "Back to safety" button on Chrome's privacy warning; the
     caller looks for "Advanced" on the same row, at the left of the text column.
+  * `same_view` - did a scroll move the page (the view is unchanged at the bottom)?
   * `calc_grid` / `highlighted` - where Calc's cells are on screen, and which column/row
     headers are lit (the selected cell). AOO exposes no cells to UI Automation (VM), so the
     agent finds them by eye, like a person, and clicks them.
@@ -26,6 +27,16 @@ def is_blank(w, h, gray, tol=4.0):
     m = sum(sample) / len(sample)
     var = sum((p - m) ** 2 for p in sample) / len(sample)
     return var ** 0.5 < tol
+
+
+def same_view(a, b, tol=1.5):
+    """True if two grabs of the same region (equal size) show the same picture: mean absolute
+    pixel difference under `tol` grey levels. A page that stopped moving after a wheel flick
+    is at its end."""
+    if len(a) != len(b) or not a:
+        return False
+    sa, sb = a[::5], b[::5]
+    return sum(abs(x - y) for x, y in zip(sa, sb)) / len(sa) < tol
 
 
 def _cell_score(w, gray, cx, cy, cw, ch):
@@ -310,16 +321,16 @@ def _calc_window(rng, w=1280, h=800, sel=(0, 0)):
     x0, y0 = rng.randint(30, 45), rng.randint(130, 160)  # A1's top-left
     cw, rh = rng.choice((81, 80, 88)), rng.choice((17, 18))
     hy0 = y0 - rh
-    for xx in range(300, 316):                          # a blue toolbar icon (decoy)
-        for yy in range(60, 76):
-            g[yy * w + xx], bl[yy * w + xx] = 110, 120
-    for yy in range(y0, h - 40):                        # white sheet with light gridlines
-        for xx in range(x0, w):
-            g[yy * w + xx] = 192 if (xx - x0) % cw == cw - 1 or (yy - y0) % rh == rh - 1 else 255
+
     def fill(xa, xb, ya, yb, v, b=0):
         for yy in range(ya, yb):
             for xx in range(xa, xb):
                 g[yy * w + xx], bl[yy * w + xx] = v, b
+
+    fill(300, 316, 60, 76, 110, 120)                    # a blue toolbar icon (decoy)
+    for yy in range(y0, h - 40):                        # white sheet with light gridlines
+        for xx in range(x0, w):
+            g[yy * w + xx] = 192 if (xx - x0) % cw == cw - 1 or (yy - y0) % rh == rh - 1 else 255
     ncol, nrow = (w - x0) // cw, (h - 40 - y0) // rh
     for c in range(ncol):
         lit = c == sel[0]
@@ -335,7 +346,7 @@ def _calc_window(rng, w=1280, h=800, sel=(0, 0)):
 
 
 def selftest(trials=20):
-    """Return (precision, recall_ok, blank_ok, consent_ok, warning_ok, grid_ok) over
+    """Return (precision, recall_ok, blank_ok, consent_ok, warning_ok, grid_ok, view_ok) over
     synthetic pages."""
     rng = random.Random(7)
     hits = total = 0
@@ -381,7 +392,14 @@ def selftest(trials=20):
         grid_ok &= highlighted(bytes(bl[y * w + sx] for y in range(h)), y0, rh, got["nrow"]) == [2]
     w, h, g, _ = _synthetic(rng)
     grid_ok &= calc_grid(w, h, g, bytes(w * h)) is None
-    return (hits / total if total else 0.0), recall_ok, blank_ok, consent_ok, warning_ok, grid_ok
+    w, h, g, _ = _synthetic(rng)
+    w2, h2, g2, _ = _synthetic(rng)                     # another page; same size, other text
+    shifted = g[w * 14:] + g[:w * 14]                   # the page scrolled by one text line
+    noisy = bytes(min(255, p + rng.randint(0, 2)) for p in g)   # same view, a little sensor noise
+    view_ok = same_view(g, g) and same_view(g, noisy) and not same_view(g, g2) \
+        and not same_view(g, shifted) and not same_view(g, g[:-1]) and not same_view(b"", b"")
+    return ((hits / total if total else 0.0), recall_ok, blank_ok, consent_ok, warning_ok, grid_ok,
+            view_ok)
 
 
 if __name__ == "__main__":

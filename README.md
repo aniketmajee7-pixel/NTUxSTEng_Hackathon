@@ -40,10 +40,21 @@ python -B research_task.py    # the research goal alone (~10 min), prints step d
 agent.pyw                     # the real 15+ min run: double-click, no console window
 ```
 
-For the real run, prefer a shortcut whose target is `pythonw.exe "<folder>\agent.pyw"`, started
-from Explorer: then the agent's parent is `explorer.exe` and there is no console. (Double-clicking
-the .pyw may go via the `pyw.exe` launcher; check the tree in Process Explorer.) **To stop it,
-move the mouse.** `python -B agent.py` runs the same day with a console, for debugging.
+For the real run, use a desktop shortcut whose target is `"<path>\pythonw.exe" -B "<folder>\agent.pyw"`,
+started by double-clicking it: then the agent's parent is `explorer.exe` and there is no console.
+(Double-clicking the .pyw itself may go via the `pyw.exe` launcher; debug only.) **Moving the
+mouse only pauses the agent**: it waits until the mouse is left alone for ~8 s, saves and drops
+the task in hand, and carries on, so a judge can use Process Explorer mid-run. **To stop it, park
+the pointer in the top-left screen corner for 2 s.** `python -B agent.py` runs the same day with
+a console, for debugging.
+
+Preflight before the graded run:
+1. `python --version` is 3.11 or newer (older versions quantize sleeps to 15.6 ms).
+2. The agent folder has no `__pycache__`.
+3. Notepad, OpenOffice and Chrome are closed, with no restored or unsaved tabs; AOO first-run done.
+4. Procmon filters `Process Name is pythonw.exe` + `Operation is WriteFile`, and Process Create,
+   stay empty for the first minute.
+5. Process Explorer shows explorer.exe -> pythonw.exe, and explorer.exe -> chrome / soffice.
 
 On a dev machine (no VM needed):
 

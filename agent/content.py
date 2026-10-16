@@ -8,43 +8,6 @@ the same thing (a Chimera-style realism metric). All in memory: python.exe must 
 import random
 import re
 
-# Hand-authored office prose, kept only as a reference set of "human" 6-grams so judge_sim
-# can confirm generated prose does NOT copy source text verbatim.
-_CORPUS = """
-Following up on the discussion from this morning, I have pulled together the numbers we need.
-The finance team still has to sign off before we can commit to anything on this.
-Two of the options looked reasonable, and we are leaning towards the cheaper of the two.
-The timeline has slipped by about a week because the approvals took longer than expected.
-I asked the rest of the team to send their inputs by Wednesday so we can consolidate them.
-There were no major concerns raised in the meeting, which is a good sign for the schedule.
-Please take a look when you have a moment and let me know if anything stands out.
-The draft is mostly done, but a few of the figures still need checking against the invoice.
-We should confirm the budget with procurement before we place the order next week.
-Delivery times vary quite a bit between the suppliers, so that is worth factoring in.
-I compared the shortlisted models side by side and the differences are smaller than I thought.
-On balance the mid-range option gives us the best value without stretching the budget.
-Let me know if you would rather I look at a couple of other vendors before we decide.
-The server migration is scheduled for the weekend, and the team is on standby if needed.
-I have booked the meeting room for Thursday afternoon so we can walk through the proposal.
-A quick reminder that the quarterly report is due at the end of the month.
-The headcount plan has not changed since the last review, so the figures carry over.
-We ran into a small issue with the licence counts, but it should be resolved by Friday.
-The training schedule is attached, and I have left the afternoon slots open for questions.
-Overall the feedback from the pilot was positive, and the few bugs have since been fixed.
-I think we are in good shape, but I want to double-check the totals before sending it round.
-If the price holds we should go ahead, otherwise it may be worth waiting for the next sale.
-The offsite is confirmed for the first week of next month, details to follow shortly.
-Thanks for the quick turnaround on this, it really helped keep things moving.
-I will update the sheet once the last two quotes come in from the remaining suppliers.
-Can we move the review to later in the week? Something has come up on my end.
-The numbers below are rough for now and I will firm them up after the call tomorrow.
-Nothing urgent, just wanted to flag it early so it does not catch anyone by surprise.
-"""
-
-_CORPUS_6 = {tuple(w[i:i + 6]) for w in map(str.split, _CORPUS.strip().splitlines())
-             for i in range(len(w) - 5)}
-
-
 # A Tracery-style slot grammar (an order-2 Markov over a tiny corpus just reproduces it):
 # coherent office prose with high distinct-n and no copied spans. {symbols} expand recursively.
 # Each verb has its own object list so every expansion is grammatical ("the draft still needs
@@ -110,6 +73,19 @@ def sentence(rng=random):
     return s[0].upper() + s[1:]
 
 
+def fresh(make, seen, tries=4):
+    """make() until it gives a sentence not in `seen` (a few tries, then accept a repeat),
+    and record it. `make` may return None (nothing to say): that passes straight through."""
+    s = make()
+    for _ in range(tries):
+        if s is None or s not in seen:
+            break
+        s = make()
+    if s is not None:
+        seen.add(s)
+    return s
+
+
 def world_sentence(world, rng=random):
     """A sentence grounded in what this session actually did (sites browsed, files saved,
     models noted), so memos cohere with the browsing; None if there is nothing to say yet."""
@@ -118,8 +94,9 @@ def world_sentence(world, rng=random):
         shop = rng.choice(world.visited)
         options.append(f"I had another look at the {shop} site earlier and nothing has changed "
                        f"on pricing.")
-    if world.files:
-        options.append(f'The figures are in "{rng.choice(world.files)}" if you want the detail.')
+    sheets = [f for f in world.files if "comparison" in f.lower()]    # not the notes or a draft
+    if sheets:
+        options.append(f'The figures are in "{rng.choice(sheets)}" if you want the detail.')
     if world.findings:
         shop, model, price = rng.choice(world.findings)
         options.append(f"For reference, the {model} from {shop} was listed at S${price:,}.")
@@ -128,6 +105,8 @@ def world_sentence(world, rng=random):
     if world.terms:
         shop, term = rng.choice(sorted(world.terms.items()))
         options.append(f"The {shop} homepage was pushing {term} when I checked.")
+    if world.downloads:
+        options.append("I also saved a copy of one of the shop pages to Downloads for reference.")
     return rng.choice(options) if options else None
 
 
@@ -156,13 +135,13 @@ class WorldState:
     _NAMES = ["Alex", "Sam", "Jordan", "Priya", "Wei", "Daniel", "Mei", "Raj"]
 
     def __init__(self, rng=random):
-        self.rng = rng
         self.name = rng.choice(self._NAMES)
         self.visited = []          # shop names actually browsed, in order
         self.findings = []         # (shop, model, price)
         self.budget = None
         self.files = []            # filenames saved this session
         self.terms = {}            # shop -> a word actually copied off its homepage
+        self.downloads = []        # pages saved from Chrome (their saved names)
 
     def visit(self, shop):
         if shop not in self.visited:
