@@ -22,9 +22,9 @@ import screen
 import timing
 import vision
 from human_input import (Interrupted, nap, VK_CONTROL, VK_ESCAPE, VK_F5, VK_LEFT, VK_MENU,
-                         VK_NEXT, VK_OEM_PLUS, click, cursor_pos, double_click, ensure_focus, find_window,
-                         focus, hotkey, hover_in, move_to, scroll, tap, wait_for_window,
-                         wait_title, window_title)
+                         VK_NEXT, VK_OEM_PLUS, VK_RETURN, click, cursor_pos, double_click, ensure_focus, find_window,
+                         focus, hotkey, hover_in, move_to, scroll, tap, type_text,
+                         wait_for_window, wait_title, window_title)
 from session import fill_save_dialog, run_standalone
 
 # Homepages from the organisers' list. VM recordings (teammates' desktop-demo handoff, 10 Oct): coinbase,
@@ -44,6 +44,18 @@ _STOP = {"sign", "menu", "home", "shop", "cart", "search", "more", "login", "hel
          "close", "open", "next", "back", "click", "here", "free", "today", "only", "best"}
 # consent-banner / legal words: a "word off the page" that is really cookie small print
 _LEGAL = {"cookie", "cookies", "privacy", "accept", "policy", "terms", "consent"}
+
+# A word a visitor would look for on each homepage with Ctrl+F (the teammates' desktop-demo
+# config.json "term" per site; the shop sites are in it too). Any other host: its own name.
+FIND_TERMS = {
+    "www.samsung.com": "Galaxy", "aws.amazon.com": "cloud", "www.apple.com": "Mac",
+    "apnews.com": "news", "coingecko.com": "Bitcoin", "www.archive.org": "archive",
+    "www.arstechnica.com": "technology", "www.aliexpress.com": "deals", "www.arxiv.org": "papers",
+    "www.asana.com": "projects", "www.asus.com": "laptop", "www.bbc.com": "news",
+    "www.binance.com": "crypto", "www.bing.com": "search", "www.bleacherreport.com": "sports",
+    "www.booking.com": "hotels", "www.cnet.com": "reviews", "www.cnn.com": "news",
+}
+FIND_SHARE = 0.35                                       # of site visits that look something up
 
 
 def _over_page(hwnd, rng):
@@ -68,12 +80,13 @@ def _section(hwnd, rect, rng, before):
     return not vision.same_view(before, view), view
 
 
-def read_page(hwnd, rng=random, sections=(5, 8)):
+def read_page(hwnd, rng=random, sections=(5, 8), midway=None):
     """Browse a page the way a recording of a person did: 5-8 sustained downward moves, each
     followed by a look at the new section (about 1.1 s, a quarter of the time 3-5 s), one
     "interest" hover on some text, an early small step back up, and, once the view stops
     changing (bottom), a 1-2 step review upward. `sections=(1, 2)` is a glance: just the
-    moves and looks."""
+    moves and looks. `midway`: a callable run once part way through (after about half the
+    sections, or at the bottom if the page ends first) - e.g. a Ctrl+F lookup."""
     n = rng.randint(*sections)
     full = n >= 4
     _over_page(hwnd, rng)
@@ -81,12 +94,17 @@ def read_page(hwnd, rng=random, sections=(5, 8)):
     view = screen.grab_gray(rect, 8)[2]
     hover_at = rng.randint(1, n - 1) if full else -1    # after which section the eye is caught
     early = rng.randint(1, 2)
+    pause_at = n // 2
     for i in range(n):
         moved, view = _section(hwnd, rect, rng, view)
         if not moved:
             nap(timing.short_s(0.5))                    # nothing moved: that's the end
             break
         nap(timing.review_s())
+        if i == pause_at and midway:
+            midway, mid = None, midway
+            mid()
+            view = screen.grab_gray(rect, 8)[2]         # the match scrolled the page
         if i == hover_at:
             spots = _spots(hwnd, rng)
             if spots:
@@ -98,10 +116,49 @@ def read_page(hwnd, rng=random, sections=(5, 8)):
             nap(timing.short_s(0.7))
         elif rng.random() < 0.15:                       # reposition the hand over the content
             hover_in(hwnd, rng.uniform(0.3, 0.7), rng.uniform(0.4, 0.8))
+    if midway:                                          # the page ended before the pause
+        midway()
     if full:
         for _ in range(rng.randint(1, 2)):
             scroll(-rng.randint(3, 6))
             nap(timing.review_s())
+
+
+def find_on_page(hwnd, rng, term):
+    """Ctrl+F, type the site's keyword, Enter, sometimes step on to the next match or two
+    (a short read after each), Esc to close the bar. A takeover mid-way still closes the
+    bar before the exception goes on: the next omnibox use must not meet it."""
+    try:
+        ensure_focus(hwnd)
+        hotkey(VK_CONTROL, ord("F"))
+        nap(timing.short_s(0.6))                        # the bar slides in
+        ensure_focus(hwnd)
+        type_text(term, exact=True)
+        nap(timing.short_s(0.35))
+        tap(VK_RETURN)
+        nap(timing.review_s())
+        for _ in range(rng.choice((0, 0, 1, 2))):
+            tap(VK_RETURN)                              # next match
+            nap(timing.review_s())
+        ensure_focus(hwnd)
+        tap(VK_ESCAPE)
+        nap(timing.short_s(0.4))
+    except Exception:
+        try:
+            ensure_focus(hwnd)
+            tap(VK_ESCAPE)
+        except Exception:
+            pass
+        raise
+
+
+def lookup_for(hwnd, rng, host):
+    """For `read_page(midway=...)`: on about a third of site visits (FIND_SHARE) a function
+    that looks up the site's keyword on the page, else None."""
+    if rng.random() >= FIND_SHARE:
+        return None
+    term = FIND_TERMS.get(host) or host.split(".")[-2]  # no entry: the site's own name
+    return lambda: find_on_page(hwnd, rng, term)
 
 
 def page_extra(hwnd, rng):
@@ -245,7 +302,7 @@ def web_task(session, sites=None):
         hwnd = session.open_url(site, new_tab=(rng.random() < 0.5))
         if hwnd is None:                                # warning with no way past / blank page
             continue
-        read_page(hwnd, rng)
+        read_page(hwnd, rng, midway=lookup_for(hwnd, rng, site))
         page_extra(hwnd, rng)
         if rng.random() < 0.6:
             try_a_link(hwnd, rng)

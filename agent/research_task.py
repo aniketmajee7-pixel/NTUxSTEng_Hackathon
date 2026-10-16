@@ -24,10 +24,11 @@ import timing
 from content import fresh, world_sentence
 from human_input import (nap, VK_CONTROL, VK_DOWN, VK_END, VK_HOME, click_in, ensure_focus, focus,
                          hotkey, tap, type_text)
-from office_loop import (check_cell, enter_cells, enter_row, goto_cell, move_cursor, new_sheet,
-                         new_writer, paste_down, type_paragraph)
+from office_loop import (bold_header, check_cell, currency_format, enter_cells, enter_row,
+                         goto_cell, move_cursor, new_sheet, new_writer, parse_number, paste_down,
+                         polish, read_cell, select_block, sort_dialog, type_paragraph)
 from session import run_standalone
-from web_loop import copy_a_word, glance, page_extra, read_page, save_page, try_a_link
+from web_loop import copy_a_word, glance, lookup_for, page_extra, read_page, save_page, try_a_link
 
 # Approximate SGD list prices, used as what the "researcher" noted on each site.
 CATALOGUE = {
@@ -82,7 +83,7 @@ def _memo_lines(findings, budget, shops):
              "quote before we order.",
              f"I kept the shortlist to {len(findings)} models and left anything above "
              f"{money(budget)} out of the running.",
-             f"The comparison sheet uses the {money(budget)} budget in cell F1, so the Yes/No "
+             f"The comparison sheet uses the {money(budget)} budget in cell G1, so the Yes/No "
              f"column moves if that changes."]
     if "AliExpress" in shops:
         lines.append("Delivery is about 3 to 5 working days from the brand shops and nearer two "
@@ -154,7 +155,7 @@ def visit_shop(session, research, shop):
         session.note(f"{shop}: site wouldn't load, skip")
         return
     session.world.visit(shop)
-    read_page(hwnd, rng)
+    read_page(hwnd, rng, midway=lookup_for(hwnd, rng, SHOP_SITES[shop]))
     page_extra(hwnd, rng)
     if rng.random() < 0.5:
         try_a_link(hwnd, rng)
@@ -183,7 +184,7 @@ def _rows(session, hwnd, findings, first_row):
     paste = len(findings) >= 2 and session.rng.random() < 0.7
     for row, (shop, model, price) in enumerate(findings, start=first_row):
         # AOO uses ';' as the function argument separator
-        enter_row(session, hwnd, row, (shop, model, str(price)), f'=IF(C{row}<=$F$1;"Yes";"No")',
+        enter_row(session, hwnd, row, (shop, model, str(price)), f'=IF(C{row}<=$G$1;"Yes";"No")',
                   fill=paste and row > first_row)
     if paste:
         paste_down(session, hwnd, 3, first_row, first_row + 1, first_row + len(findings) - 1)
@@ -193,7 +194,9 @@ def start_sheet(session, research):
     """New comparison sheet with the shops noted so far; saved, then closed."""
     rng = session.rng
     hwnd = new_sheet(session)
-    enter_cells(hwnd, "Shop", "Model", "Price (SGD)", "Within budget", "Budget", str(research.budget))
+    # the budget sits one empty column clear of the table, so Data > Sort sees only A:D later
+    enter_cells(hwnd, "Shop", "Model", "Price (SGD)", "Within budget", "", "Budget",
+                str(research.budget))
     rows = [f for f in research.findings if f[0] in session.world.visited]
     _rows(session, hwnd, rows, 2)
     if rng.random() < 0.5:
@@ -205,6 +208,44 @@ def start_sheet(session, research):
     research.sheet_rows = rows
     research.sheet = name
     session.close_doc()
+
+
+def table_matches(text, rows, budget, by_price):
+    """Does `text` - the A2:D block of the comparison sheet as read back through the clipboard
+    (tab-separated, prices maybe shown as currency) - hold exactly `rows` (shop, model, price),
+    each with the Yes/No its price earns against `budget`? `by_price`: and in price order
+    (ties in either order). A sort that went wrong - another key, the header swept in, formulas
+    pointing at the wrong row - fails this."""
+    got = [line.split("\t") for line in text.replace("\r\n", "\n").strip("\n").split("\n")]
+    if len(got) != len(rows) or any(len(cells) != 4 for cells in got):
+        return False
+    prices = [parse_number(cells[2]) for cells in got]
+    if None in prices or (by_price and prices != sorted(prices)):
+        return False
+    have = sorted((c[0], c[1], p, c[3]) for c, p in zip(got, prices))
+    want = sorted((shop, model, float(price), "Yes" if price <= budget else "No")
+                  for shop, model, price in rows)
+    return have == want
+
+
+def sort_by_price(session, research, hwnd, rows):
+    """Data > Sort by the Price column, then read the table back (A2:D, one copy). If it is
+    not `rows` in price order, Ctrl+Z and keep the entry order - the table is never retyped.
+    Must run before the summary rows exist, or the sort would sweep them up."""
+    if not sort_dialog(session, hwnd, "P", 1, 1):
+        print("    sort dialog did not open; entry order kept", flush=True)
+        return
+    select_block(session, hwnd, 0, 1, 4, len(rows))
+    if table_matches(read_cell(), rows, research.budget, by_price=True):
+        return
+    print("    sort did not give the price order; undoing it", flush=True)
+    nap(timing.think_s(1.2))                            # "that's not right"
+    ensure_focus(hwnd)
+    hotkey(VK_CONTROL, ord("Z"))
+    nap(timing.think_s(0.8))
+    select_block(session, hwnd, 0, 1, 4, len(rows))
+    if not table_matches(read_cell(), rows, research.budget, by_price=False):
+        print("    undo did not bring the table back; leaving it", flush=True)
 
 
 def finish_sheet(session, research):
@@ -219,12 +260,18 @@ def finish_sheet(session, research):
         click_in(hwnd, 0.3, 0.45)
         nap(timing.perceive_s())
         ensure_focus(hwnd)
-        hotkey(VK_CONTROL, VK_END)                      # last used cell: F of the last data row
+        hotkey(VK_CONTROL, VK_END)                      # last used cell: G of the last data row
         nap(timing.short_s(0.3))
         tap(VK_DOWN)
         tap(VK_HOME)                                    # first empty row, column A
     _rows(session, hwnd, rest, first)
     last = first + len(rest) - 1
+    rows = research.sheet_rows + rest
+    # tidy the table now the data is in and before any summary row exists
+    if polish(session, [lambda: bold_header(session, hwnd, 4),
+                        lambda: currency_format(session, hwnd, 2, 2, last),
+                        lambda: sort_by_price(session, research, hwnd, rows)]):
+        goto_cell(session, hwnd, 0, last)               # the first empty row, column A
     prices = [p for _, _, p in research.findings]
     lo = min(prices)
     avg = int(Decimal(sum(prices) / len(prices)).quantize(Decimal(1), rounding=ROUND_HALF_UP))

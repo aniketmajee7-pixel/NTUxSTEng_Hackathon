@@ -111,7 +111,9 @@ class Workday:
         if now >= self.deadline + HARD_STOP_MINUTES * 60:
             log("hard stop: the goal is unfinished, ending the day anyway")
             return False
-        slack = self.deadline - now - self.goal.remaining_est() * 1.15
+        # x1.4: the teammates' full VM run was ~1.25x slower than their pilot (10 Oct), and the
+        # estimates are fake-desktop timings, so keep a margin above that on the goal's work
+        slack = self.deadline - now - self.goal.remaining_est() * 1.4
         ready = self.goal.ready()
         if ready and (slack < 60 or self.rng.random() < 0.55):
             # mostly continue the obvious next step, sometimes another eligible one

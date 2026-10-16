@@ -21,6 +21,8 @@ Usage (from the repo root):
         [--collide]   the first Save As of every dialog hits "Confirm Save As" (name taken)
         [--restore]   Notepad (Win11) reopens last session's notes.txt; Ctrl+N makes a new tab
         [--caps]      Caps Lock is on at start: letters type case-swapped until the agent taps it off
+        [--badsort]   Data > Sort ignores the typed key and sorts the price column descending: the
+                      agent must read the table back, see the wrong order and Ctrl+Z it
 The last line is always `trace: <sha1>` over every injected input event and the simulated
 time (1 ms): the same seed must give the same digest, so a refactor that should not change
 behaviour can be checked by comparing it.
@@ -83,6 +85,9 @@ class Desktop:
         self.last_click = (0.0, (0, 0))
         self.chrome_sel = None
         self.consent_ok = set()  # hosts whose cookie modal has been accepted
+        self.fmts = {}          # saved Calc doc -> (currency cells, bold cells)
+        self.badsort = False    # --badsort
+        self.cur_sym = "$"      # what Ctrl+Shift+4 shows before the amount (set per seed)
         self.keylog = []        # (time, vk, up) of every non-modifier key event
         self.collide = False    # --collide: every Save As dialog's first Enter finds the name taken
         self.restore = False    # --restore: Notepad comes back with last session's notes.txt
@@ -122,6 +127,39 @@ class Desktop:
     def log(self, *e):
         self.events.append(e)
 
+    def tick(self):
+        """Apply a Chrome navigation that was held back: from a warning tab, Chrome keeps
+        showing the old warning (and its title) for about a second after Enter (VM, 10 Oct)."""
+        for w in self.wins.values():
+            pend = w.data.get("pending") if w.app == "chrome" else None
+            if pend and clock[0] >= pend[0]:
+                w.data["pending"] = None
+                self.navigate(w, pend[1])
+
+    def navigate(self, w, url):
+        d = w.data
+        if url in HSTS_SITES or url in WARN_SITES:
+            d["warn"] = {"host": url, "open": False, "hsts": url in HSTS_SITES}
+            d["hist"].append("Privacy error")
+            w.title = "Privacy error - Google Chrome"
+            return
+        d["hist"].append(url)
+        w.title = f"{url} - Google Chrome"
+        d["scroll"] = 0
+
+    @staticmethod
+    def tab_state(w):
+        d = w.data
+        return {"hist": list(d["hist"]), "title": w.title, "scroll": d.get("scroll", 0),
+                "zoom": d.get("zoom", 0), "warn": d.get("warn")}
+
+    @staticmethod
+    def restore_tab(w, st):
+        d = w.data
+        d.update(hist=st["hist"], scroll=st["scroll"], zoom=st["zoom"], warn=st["warn"],
+                 addr=None, pending=None)
+        w.title = st["title"]
+
     # ------------------------------------------------------------ keyboard
     SIDED = {0xA0: 0x10, 0xA1: 0x10, 0xA2: 0x11, 0xA3: 0x11, 0xA4: 0x12, 0xA5: 0x12, 0x5C: 0x5B}
 
@@ -130,6 +168,7 @@ class Desktop:
         return self.SIDED.get(vk, vk) in self.mods and vk not in (0xA1, 0xA3, 0xA5, 0x5C)
 
     def key(self, vk, up):
+        self.tick()
         vk = self.SIDED.get(vk, vk)
         if vk not in (0x10, 0x11, 0x12, 0x5B, 0xE8):
             self.keylog.append((clock[0], vk, up))
@@ -236,10 +275,40 @@ class Desktop:
             raise Fail(f"unexpected Run command {cmd!r}")
 
     # chrome
+    def k_find(self, w, vk, ctrl, alt):
+        """Keys while Chrome's find bar is open: typing goes to the bar, Enter steps to the
+        next match, Esc closes it. Anything else is an omnibox or page action taken with the
+        bar still up (the agent closes it first)."""
+        d = w.data
+        if ctrl or alt:
+            raise Fail(f"Ctrl/Alt+{vk:#x} sent to Chrome while the find bar is open")
+        if vk == 0x1B:
+            self.log("find", "".join(d["find"]), d["found"])
+            d["find"] = None
+        elif vk == 0x0D:
+            if not d["find"]:
+                raise Fail("Enter in an empty find bar")
+            d["found"] += 1
+        elif vk == 0x08:
+            if d["find"]:
+                d["find"].pop()
+        else:
+            c = self.ch(vk, 0x10 in self.mods)
+            if c is None:
+                raise Fail(f"key {vk:#x} sent to Chrome while the find bar is open")
+            d["find"].append(c)
+
     def k_chrome(self, h, w, vk, ctrl, alt, shift):
         d = w.data
+        if d.get("find") is not None:
+            return self.k_find(w, vk, ctrl, alt)
         if ctrl and shift and vk == ord("W"):
             self.close(h)
+            return
+        if ctrl and vk == ord("F"):
+            if d["addr"] is not None or not self.chrome_page(w):
+                raise Fail("Ctrl+F in Chrome with no loaded page in front")
+            d["find"], d["found"] = [], 0
             return
         if ctrl and vk == ord("S"):                     # Save page as: Chrome's own Save As dialog
             if d["addr"] is not None or w.title.startswith(("New Tab", "Privacy error")):
@@ -248,37 +317,41 @@ class Desktop:
             return
         if ctrl and vk in (ord("L"), ord("T")):
             d["addr"] = []
-            if vk == ord("T"):
-                d["hist"] = ["New Tab"]
+            if vk == ord("T"):                          # a new tab on the right; the old one stays behind
+                d.setdefault("bg", []).append(self.tab_state(w))
+                d.update(hist=["New Tab"], scroll=0, zoom=0, warn=None, pending=None)
                 w.title = "New Tab - Google Chrome"
-                d["scroll"] = 0
             return
-        if ctrl and vk == ord("W"):
-            return                                      # closes a tab; window stays
+        if ctrl and vk == ord("W"):                     # closes the tab; the one on its left comes back
+            if not d.get("bg"):
+                raise Fail("Ctrl+W on the only Chrome tab: the window would close")
+            self.restore_tab(w, d["bg"].pop())
+            self.log("tabclosed", w.title)
+            return
         if ctrl and vk == ord("C"):
             if self.chrome_sel:
                 self.set_clip(self.chrome_sel + " ")
             return
         if alt and vk == 0x25:                          # Alt+Left
+            d["pending"] = None
             if len(d["hist"]) > 1:
                 d["hist"].pop()
                 w.title = d["hist"][-1] + " - Google Chrome"
                 d["scroll"] = 0
             return
         if d["addr"] is not None:
+            if vk != 0x0D and w.title.startswith("Privacy error"):
+                raise Fail("typed into the omnibox while the tab still shows a privacy warning "
+                           "(a site given up on must be left, not typed over)")
             url = self._addr_key(d, vk, shift)
             if url is not None:
                 self.log("nav", url)
                 if not re.fullmatch(r"[a-z0-9.\-]+\.[a-z]{2,}", url):
                     raise Fail(f"bad URL typed in omnibox: {url!r}")
-                if url in HSTS_SITES or url in WARN_SITES:
-                    d["warn"] = {"host": url, "open": False, "hsts": url in HSTS_SITES}
-                    d["hist"].append("Privacy error")
-                    w.title = "Privacy error - Google Chrome"
-                    return
-                d["hist"].append(url)
-                w.title = f"{url} - Google Chrome"
-                d["scroll"] = 0
+                if w.title.startswith("Privacy error"):
+                    d["pending"] = (clock[0] + 1.0, url)    # the old warning stays up a moment
+                else:
+                    self.navigate(w, url)
             return
         if self.chrome_page(w) and not alt:             # keys that act on a loaded page
             if vk in (0x20, 0x22) and not ctrl:         # Space, Page Down: about 7 notches
@@ -321,7 +394,7 @@ class Desktop:
         title = f"{name or f'Untitled {self.untitled}'} - OpenOffice {kind}"
         data = {"kind": kind, "grid": dict(grid or {}), "cur": [0, 0], "edit": None,
                 "tabstart": None, "name": name, "dirty": False,
-                "anchor": None, "marked": None}
+                "anchor": None, "marked": None, "curr": set(), "bolds": set(), "undo": None}
         sc = self.find(lambda w: w.app == "startcenter")
         if sc:                                          # the Start Center turns into the doc
             h = sc[0]
@@ -332,6 +405,10 @@ class Desktop:
             h = self.new(title, "SALFRAME", "office", data)
         self.wins[h].buf = []
         return h
+
+    def calc_mark(self, d):
+        """The range a Calc view shows lit: the pasted range still marked, else the selection."""
+        return d["marked"] or self.selection(d)
 
     def _office_shared(self, h, w, vk, ctrl, alt):
         """Keys the Start Center and every OpenOffice window share. True if handled."""
@@ -356,6 +433,11 @@ class Desktop:
             return
         if alt and vk == ord("I"):
             self.menu = ["insert"]
+            return
+        if alt and vk == ord("D") and d["kind"] == "Calc":
+            if d["edit"] is not None:
+                raise Fail("Alt+D while a cell is in edit mode")
+            self.menu = ["data"]
             return
         if ctrl and vk == ord("S"):
             if d["name"] is None:
@@ -428,6 +510,11 @@ class Desktop:
             i = vk - ord("1")
             if i < len(names):
                 self.load(names[i])
+        elif m == ["data"]:
+            self.menu = None
+            if vk != ord("S"):
+                raise Fail(f"key {vk:#x} in the Calc Data menu (only Sort is used)")
+            self.open_sort(w)
         elif m == ["insert"] and vk == 0x0D:
             self.menu = None
             w.data["dirty"] = True
@@ -442,15 +529,25 @@ class Desktop:
             d["grid"][tuple(d["cur"])] = "".join(d["edit"])
             d["edit"] = None
             d["dirty"] = True
+            d["undo"] = None
 
     def calc_click(self, d):
         """A click on the sheet selects that cell. Mid-formula it would insert a reference."""
         x, y = self.cursor
-        if not (x >= CALC_X0 and CALC_Y0 <= y < CALC_Y0 + CALC_NROW * CALC_RH):
+        if not (CALC_Y0 <= y < CALC_Y0 + CALC_NROW * CALC_RH):
             return
         if d["edit"] and d["edit"][0] == "=":
             raise Fail(f"clicked the sheet while typing {''.join(d['edit'])!r}: "
                        "AOO would insert a cell reference")
+        if x < CALC_X0:                                 # a row header selects the whole row
+            if x < 2:
+                return
+            self.calc_commit(d)
+            row = (y - CALC_Y0) // CALC_RH
+            d["anchor"], d["marked"], d["tabstart"] = (0, row), None, None
+            d["cur"][:] = [CALC_NCOL - 1, row]
+            self.log("rowclick", row)
+            return
         self.calc_commit(d)
         d["anchor"] = d["marked"] = None
         d["cur"][:] = [(x - CALC_X0) // CALC_CW, (y - CALC_Y0) // CALC_RH]
@@ -497,7 +594,120 @@ class Desktop:
         d["marked"] = (c0, r0, c1, r1)                  # the pasted range stays marked
         d["anchor"] = None
         d["dirty"] = True
+        d["undo"] = None
         self.log("calcpaste", (c0, r0, c1, r1))
+
+    def calc_format(self, d, vk, shift):
+        """Ctrl+B (bold; a flag here) and Ctrl+Shift+4 (currency) on the selected cells."""
+        if d["edit"] is not None:
+            raise Fail("Ctrl+B / Ctrl+Shift+4 while a cell is in edit mode")
+        sel = self.calc_mark(d)
+        cells = {(c, r) for c in range(sel[0], sel[2] + 1) for r in range(sel[1], sel[3] + 1)}
+        d["dirty"] = True
+        d["undo"] = None
+        if vk == ord("B"):
+            if shift:
+                raise Fail("Ctrl+Shift+B in Calc")
+            if cells <= d["bolds"]:                     # all bold already: toggles off
+                d["bolds"] -= cells
+            else:
+                d["bolds"] |= cells
+            self.log("calcbold", sel)
+        else:
+            if not shift:
+                raise Fail("Ctrl+4 in Calc (the currency format is Ctrl+Shift+4)")
+            d["curr"] |= cells
+            self.log("currency", sel)
+
+    def is_cur(self, d, cell, depth=0):
+        """Shown as currency: formatted so, or a formula over currency cells (Calc carries the
+        format of what it refers to into the result)."""
+        if cell in d["curr"]:
+            return True
+        raw = d["grid"].get(cell, "")
+        if raw.startswith("=") and depth < 4:
+            return any(self.is_cur(d, (ord(a) - 65, int(b) - 1), depth + 1)
+                       for a, b in re.findall(r"\$?([A-Z])\$?(\d+)", raw))
+        return False
+
+    def shown(self, d, cell):
+        """The text Calc copies for a cell: the value, as currency (e.g. $1,260.00 or S$1,260.00) if so formatted."""
+        v = calc_eval(d["grid"], cell)
+        if isinstance(v, float) and self.is_cur(d, cell):
+            text = f"{self.cur_sym}{abs(v):,.2f}"
+            return "-" + text if v < 0 else text
+        return fmt(v)
+
+    def data_block(self, d):
+        """The contiguous block of non-empty cells around the cursor (Calc's data area)."""
+        used = {k for k, v in d["grid"].items() if v != ""}
+        cur = tuple(d["cur"])
+        if cur not in used:
+            return None
+        block, todo = {cur}, [cur]
+        while todo:
+            c, r = todo.pop()
+            for dc in (-1, 0, 1):
+                for dr in (-1, 0, 1):
+                    n = (c + dc, r + dr)
+                    if n in used and n not in block:
+                        block.add(n)
+                        todo.append(n)
+        return (min(c for c, _ in block), min(r for _, r in block),
+                max(c for c, _ in block), max(r for _, r in block))
+
+    def open_sort(self, w):
+        """Data > Sort: the Sort dialog on the data area. The header row is recognised when
+        every cell in the first row is text; sort key 1 starts on the cursor's column."""
+        d = w.data
+        blk = self.data_block(d)
+        if blk is None:
+            raise Fail("Data > Sort on an empty cell")
+        c0, r0, c1, r1 = blk
+        header = all(re.fullmatch(r"[^=\d.\-].*", d["grid"].get((c, r0), "")) for c in range(c0, c1 + 1))
+        names = [d["grid"][(c, r0)] if header else f"Column {chr(65 + c)}" for c in range(c0, c1 + 1)]
+        key = min(max(d["cur"][0], c0), c1) - c0
+        self.dialog("Sort", "sort", target=self.fg(), block=blk, header=header, names=names, key=key)
+
+    def k_sort(self, h, w, vk, ctrl, alt, shift):
+        d = w.data
+        if vk == 0x1B:
+            self.close(h)
+        elif vk == 0x0D:
+            self.close(h)
+            self.do_sort(self.wins[d["target"]].data, d)
+        elif 0x41 <= vk <= 0x5A and not ctrl and not alt:   # list-box type-ahead on "Sort key 1"
+            hit = [i for i, n in enumerate(d["names"]) if n.lower().startswith(chr(vk).lower())]
+            later = [i for i in hit if i > d["key"]]
+            if hit:
+                d["key"] = later[0] if d["key"] in hit and later else (d["key"] if d["key"] in hit else hit[0])
+        else:
+            raise Fail(f"key {vk:#x} sent to the Sort dialog")
+
+    def do_sort(self, cd, dlg):
+        """Sort the rows below the header by the chosen column, ascending, numbers before text,
+        stable. Rows move like a copy: relative references in their formulas follow them."""
+        c0, r0, c1, r1 = dlg["block"]
+        first = r0 + (1 if dlg["header"] else 0)
+        key, desc = c0 + dlg["key"], False
+        if self.badsort:                                # --badsort: the wrong column, wrong way round
+            price = [i for i, n in enumerate(dlg["names"]) if n.startswith("Price")]
+            key, desc = c0 + (price[0] if price else dlg["key"]), True
+        grid = cd["grid"]
+
+        def sort_key(r):
+            v = calc_eval(grid, (key, r))
+            return (0, -v if desc else v, "") if isinstance(v, float) else (1, 0.0, str(v).lower())
+
+        order = sorted(range(first, r1 + 1), key=sort_key)
+        cd["undo"] = dict(grid)
+        rows = {r: [grid.get((c, r), "") for c in range(c0, c1 + 1)] for r in range(first, r1 + 1)}
+        for new, old in zip(range(first, r1 + 1), order):
+            for i, c in enumerate(range(c0, c1 + 1)):
+                grid[(c, new)] = self.shift_refs(rows[old][i], 0, new - old)
+        cd["dirty"] = True
+        cd["anchor"] = cd["marked"] = None
+        self.log("sort", dlg["names"][key - c0], desc, dlg["header"], (c0, first, c1, r1))
 
     def k_calc(self, d, vk, ctrl, shift):
         cur = d["cur"]
@@ -520,12 +730,20 @@ class Desktop:
             c0, r0, c1, r1 = self.selection(d)
             cells = {(c - c0, r - r0): d["grid"].get((c, r), "")
                      for c in range(c0, c1 + 1) for r in range(r0, r1 + 1)}
-            vals = [fmt(calc_eval(d["grid"], (c, r))) for r in range(r0, r1 + 1)
-                    for c in range(c0, c1 + 1)]
-            self.set_clip("\r\n".join(vals) + "\r\n", cells)
+            lines = ["\t".join(self.shown(d, (c, r)) for c in range(c0, c1 + 1))
+                     for r in range(r0, r1 + 1)]        # tab-separated cells, as Calc copies them
+            self.set_clip("\r\n".join(lines) + "\r\n", cells)
             self.clip_corner = (c0, r0)
         elif ctrl and vk == ord("V"):
             self.calc_paste(d)
+        elif ctrl and vk in (ord("B"), ord("4")):
+            self.calc_format(d, vk, shift)
+        elif ctrl and vk == ord("Z"):
+            if d["undo"] is None:
+                raise Fail("Ctrl+Z in Calc with no sort just made to undo (an edit would be undone)")
+            d["grid"], d["undo"] = d["undo"], None
+            d["anchor"] = d["marked"] = None
+            self.log("undo")
         elif ctrl:
             raise Fail(f"unexpected Ctrl+{vk:#x} in Calc")
         elif vk in (0x09, 0x0D) and d["marked"]:
@@ -583,6 +801,8 @@ class Desktop:
             raise Fail(f"saved {w.title!r} with bold still switched on (unbalanced Ctrl+B)")
         name = name or d["name"]
         self._store(name, d["kind"], dict(d["grid"]) if d["kind"] == "Calc" else "".join(w.buf))
+        if d["kind"] == "Calc":
+            self.fmts[name] = (set(d["curr"]), set(d["bolds"]))
         d["name"], d["dirty"] = name, False
         w.title = f"{name} - OpenOffice {d['kind']}"
         self.log("saved", name)
@@ -591,6 +811,8 @@ class Desktop:
         kind, content = self.disk[name]
         self.mtime[name] = clock[0]
         nh = self.open_office(kind, name=name, grid=content if kind == "Calc" else None)
+        if kind == "Calc" and name in self.fmts:
+            self.wins[nh].data["curr"], self.wins[nh].data["bolds"] = map(set, self.fmts[name])
         if kind != "Calc":
             self.wins[nh].buf = list(content)
         self.log("opened", name)
@@ -732,6 +954,7 @@ class Desktop:
         w.buf.append(c)
 
     def mouse(self, mi):
+        self.tick()
         flags = mi.dwFlags
         if flags & 0x8000:
             x = round(mi.dx * (SW - 1) / 65535)
@@ -747,6 +970,8 @@ class Desktop:
         w = self.wins.get(self.fg())
         if w is None or w.app != "chrome" or not self.chrome_page(w):
             return
+        if w.data.get("find") is not None:
+            raise Fail("scrolled the page while the find bar was open")
         if self.cursor[1] < PAGE_TOP:                   # over the tab strip / toolbar: no page scroll
             self.log("wheel_off_page", self.cursor)
             return
@@ -765,6 +990,8 @@ class Desktop:
         if w.app == "office" and w.data.get("kind") == "Calc":
             self.calc_click(w.data)
             return
+        if w.app == "chrome" and w.data.get("find") is not None:
+            raise Fail("clicked the page while the find bar was open")
         if w.app == "chrome" and w.title.startswith("Privacy error"):
             d = w.data["warn"]
             if in_box(self.cursor, WARN_SAFETY):
@@ -779,7 +1006,7 @@ class Desktop:
             return
         if w.app == "chrome":
             if self.consent_shown(w):
-                if in_box(self.cursor, CONSENT_BTN):
+                if in_box(self.cursor, CONSENT[self.host(w)][2]):
                     self.consent_ok.add(self.host(w))
                     self.log("consent", self.host(w))
                 return                                  # the modal swallows other clicks
@@ -803,9 +1030,11 @@ class Desktop:
         return self.host(w) in CONSENT_SITES and self.host(w) not in self.consent_ok
 
 
-CONSENT_SITES = {"www.samsung.com"}
-CONSENT_PANEL = (300, 220, 980, 600)        # screen x0, y0, x1, y1 of the dark modal
-CONSENT_BTN = (700, 520, 940, 580)          # its Accept button
+# cookie / legal modals: a dark panel (Samsung), or a bright card on a dimmed page (CNN's
+# "Legal Terms and Privacy"); screen x0, y0, x1, y1 of the modal and of its Accept / Agree button
+CONSENT = {"www.samsung.com": ("panel", (300, 220, 980, 600), (700, 520, 940, 580)),
+           "www.cnn.com": ("card", (330, 190, 950, 570), (700, 490, 910, 534))}
+CONSENT_SITES = set(CONSENT)
 
 # How sites behaved in the VM recordings: blank pages, a privacy warning with no way past
 # (HSTS), and a privacy warning that Advanced -> Proceed gets through.
@@ -824,8 +1053,13 @@ CALC_X0, CALC_Y0, CALC_CW, CALC_RH = 40, 154, 81, 17
 CALC_NCOL, CALC_NROW = (SW - CALC_X0) // CALC_CW, (SH - 40 - CALC_Y0) // CALC_RH
 
 
-def calc_planes(cur):
-    """Full-screen (gray, blue) of a Calc window whose cursor is on `cur`."""
+# the VM's lit header is a vertical gradient from (97,168,233) to (60,120,212): (gray, blue minus red)
+LIT_TOP, LIT_BOTTOM = (166, 136), (128, 152)
+
+
+def calc_planes(sel):
+    """Full-screen (gray, blue) of a Calc window with cells `sel` = (c0, r0, c1, r1) selected:
+    their column and row headers are lit."""
     g, b = bytearray([240] * (SW * SH)), bytearray(SW * SH)
 
     def fill(x0, x1, y0, y1, v, bv=0):
@@ -833,18 +1067,28 @@ def calc_planes(cur):
             g[y * SW + x0:y * SW + x1] = bytes([v]) * (x1 - x0)
             b[y * SW + x0:y * SW + x1] = bytes([bv]) * (x1 - x0)
 
+    def lit_fill(x0, x1, y0, y1):
+        for y in range(y0, y1):
+            f = (y - y0) / max(1, y1 - y0 - 1)
+            fill(x0, x1, y, y + 1, round(LIT_TOP[0] + f * (LIT_BOTTOM[0] - LIT_TOP[0])),
+                 round(LIT_TOP[1] + f * (LIT_BOTTOM[1] - LIT_TOP[1])))
+
     fill(300, 316, 60, 76, 110, 120)                    # a blue toolbar icon
     hy0 = CALC_Y0 - CALC_RH
     for c in range(CALC_NCOL + 1):
         x = CALC_X0 + c * CALC_CW
-        lit = c == cur[0]
-        fill(x, min(SW, x + CALC_CW - 1), hy0, CALC_Y0, 127 if lit else 240, 146 if lit else 0)
+        if sel[0] <= c <= sel[2]:
+            lit_fill(x, min(SW, x + CALC_CW - 1), hy0, CALC_Y0)
+        else:
+            fill(x, min(SW, x + CALC_CW - 1), hy0, CALC_Y0, 240, 0)
         fill(min(SW, x + CALC_CW - 1), min(SW, x + CALC_CW), hy0, CALC_Y0, 105)
         fill(min(SW, x + 37), min(SW, x + 43), hy0 + 5, CALC_Y0 - 4, 20)       # the letter
     for r in range(CALC_NROW):
         y = CALC_Y0 + r * CALC_RH
-        lit = r == cur[1]
-        fill(0, CALC_X0 - 1, y, y + CALC_RH - 1, 127 if lit else 240, 146 if lit else 0)
+        if sel[1] <= r <= sel[3]:
+            lit_fill(0, CALC_X0 - 1, y, y + CALC_RH - 1)
+        else:
+            fill(0, CALC_X0 - 1, y, y + CALC_RH - 1, 240, 0)
         fill(0, CALC_X0 - 1, y + CALC_RH - 1, y + CALC_RH, 105)
         fill(16, 22, y + 4, y + CALC_RH - 4, 20)                                 # the digit
         fill(CALC_X0, SW, y, y + CALC_RH - 1, 255)                               # cells
@@ -996,12 +1240,14 @@ def install(D):
         return 1
 
     def enum(cb, lp):
+        D.tick()
         for h in list(D.z):
             if not cb(h, 0):
                 break
         return 1
 
     def gettext(h, buf, n):
+        D.tick()
         buf.value = D.wins[h].title[:n - 1] if h in D.wins else ""
         return len(buf.value)
 
@@ -1019,6 +1265,7 @@ def install(D):
         return 1
 
     def cursorpos(pp):
+        D.tick()
         p = pp._obj
         if D.poke and clock[0] >= D.poke[0]:            # someone else uses the mouse
             when, where = D.poke
@@ -1030,7 +1277,7 @@ def install(D):
 
     user32 = dict(
         SendInput=send_input, EnumWindows=enum, EnumChildWindows=lambda h, cb, lp: 1,
-        GetWindowTextLengthW=lambda h: len(D.wins[h].title) if h in D.wins else 0,
+        GetWindowTextLengthW=lambda h: (D.tick(), len(D.wins[h].title) if h in D.wins else 0)[1],
         GetWindowTextW=gettext, GetClassNameW=classname,
         IsWindowVisible=lambda h: h in D.wins, IsWindow=lambda h: h in D.wins,
         GetForegroundWindow=D.fg, SetForegroundWindow=setfg, BringWindowToTop=setfg,
@@ -1055,6 +1302,7 @@ def install(D):
     import screen
 
     def grab_gray(rect, step=2):
+        D.tick()
         l, t, r, b = rect
         w, h = max(1, (r - l) // step), max(1, (b - t) // step)
         page = D.wins.get(D.fg())
@@ -1092,10 +1340,26 @@ def install(D):
                             if 0 <= yy < h and 0 <= x0 < w:
                                 g[yy * w + x0] = 30
             if D.consent_shown(page):
-                for box, v in ((CONSENT_PANEL, 25), (CONSENT_BTN, 145)):
+                style, panel, btn = CONSENT[D.host(page)]
+
+                def paint(box, v, dens=1.0, gap=0):
                     for yy in range(max(0, (box[1] - t) // step), min(h, (box[3] - t) // step)):
+                        if gap and (yy * step) % gap >= gap - 8:
+                            continue                    # gaps between text lines
                         for xx in range(max(0, (box[0] - l) // step), min(w, (box[2] - l) // step)):
-                            g[yy * w + xx] = v
+                            if dens >= 1 or rr.random() < dens:
+                                g[yy * w + xx] = v
+
+                if style == "panel":
+                    paint(panel, 25)
+                    paint(btn, 145)
+                else:
+                    for i in range(len(g)):
+                        g[i] = g[i] * 45 // 100         # the page behind, dimmed
+                    paint(panel, 250)
+                    paint((panel[0] + 20, panel[1] + 30, panel[2] - 20, panel[1] + 250), 40, 0.4, 20)
+                    paint(btn, 35)
+                    paint((btn[0] + 50, btn[1] + 12, btn[2] - 50, btn[3] - 12), 245, 0.6)
         return w, h, bytes(g)
 
     screen.grab_gray = grab_gray
@@ -1106,7 +1370,7 @@ def install(D):
         if D.nogrid or not (page and page.app == "office" and page.data.get("kind") == "Calc"):
             w, h, g = grab_gray(rect, step)
             return w, h, g, bytes(w * h)
-        key = tuple(page.data["cur"])
+        key = D.calc_mark(page.data)
         if key not in planes_cache:
             planes_cache.clear()
             planes_cache[key] = calc_planes(key)
@@ -1125,7 +1389,7 @@ def install(D):
         if page and page.app == "chrome" and page.title.startswith("Privacy error"):
             return warning_cursor(page, D.cursor)
         if page and page.app == "chrome" and D.consent_shown(page):
-            return "hand" if in_box(D.cursor, CONSENT_BTN) else "arrow"
+            return "hand" if in_box(D.cursor, CONSENT[D.host(page)][2]) else "arrow"
         return cursor_kind_at(D.cursor)
 
     screen.cursor_kind = cursor_kind
@@ -1147,6 +1411,8 @@ def main():
     D.collide = "--collide" in args
     D.restore = "--restore" in args
     D.caps = "--caps" in args               # Caps Lock on at start: the agent must tap it off
+    D.badsort = "--badsort" in args         # Data > Sort picks the wrong key and order
+    D.cur_sym = random.Random(seed * 7 + 3).choice(("$", "S$"))   # how this VM's currency format reads
     D.poke = None                           # (sim time, cursor -> new cursor), applied once
     if "--nudge" in args:                   # a judge moves the mouse at minute 3: pause, not stop
         D.poke = (clock[0] + 180, lambda c: (min(SW - 1, c[0] + 200), max(0, c[1] - 150)))
@@ -1171,7 +1437,7 @@ def main():
         "office": lambda: (office_loop.writer_task(s), office_loop.calc_task(s)),
         "impress": lambda: office_loop.impress_task(s),
         "web": lambda: web_loop.web_task(s, sites=["www.coinbase.com", "www.bbc.com", "www.dell.com",
-                                                   "www.coinbase.com", "apnews.com"]),
+                                                   "www.coinbase.com", "www.cnn.com", "apnews.com"]),
         "desk": lambda: (desk_tasks.jot_todo(s), desk_tasks.look_over_documents(s)),
     }
     if which != "agent" and which not in flows:
@@ -1219,6 +1485,25 @@ def main():
         problems.append("overwrote an existing file instead of renaming")
     if D.collide and not any(e[0] == "collision" for e in D.events):
         problems.append("--collide never produced a Confirm Save As")
+    for host in CONSENT_SITES & set(navs):
+        if host not in D.consent_ok and not stopped:
+            problems.append(f"{host} was visited but its consent modal was never accepted")
+    if not stopped and any(w.data.get("find") is not None for w in D.wins.values() if w.app == "chrome"):
+        problems.append("a Chrome find bar was left open")
+    poked = any(e[0] == "poke" for e in D.events)
+    for e in D.events:
+        if e[0] == "find" and (not e[1] or e[2] < 1) and not poked:   # a takeover cuts a lookup short
+            problems.append(f"find bar used without a term or a step: {e[1:]}")
+        if e[0] == "calcbold" and not (e[1][0] == 0 and e[1][1] == e[1][3] == 0 and e[1][2] >= 3):
+            problems.append(f"bold on {e[1]}: not the header row from A1")
+        if e[0] == "currency" and not (e[1][0] == e[1][2] and e[1][1] >= 1):
+            problems.append(f"currency on {e[1]}: not a column of data cells")
+    for i, e in enumerate(D.events):                    # a wrong sort has to be undone
+        if e[0] == "sort" and (e[2] or not e[3]) and not any(x[0] == "undo" for x in D.events[i + 1:]):
+            problems.append(f"sort by {e[1]!r} (descending={e[2]}, header={e[3]}) was never undone")
+    if "--badsort" in args and not any(e[0] == "undo" for e in D.events) \
+            and any(e[0] == "sort" for e in D.events):
+        problems.append("--badsort: the wrong sort was not undone")
     if "--caps" in args:
         offs = [e for e in D.events if e[0] == "caps"]
         if not offs or offs[0][1] or D.caps:
@@ -1277,7 +1562,8 @@ def main():
     for e in D.events:
         if e[0] in ("run", "nav", "saved", "opened", "explorer", "paste", "link", "consent",
                     "proceed", "cellclick", "poke", "collision", "newtab", "bold", "calcpaste",
-                    "savechanges", "reload", "zoom", "caps"):
+                    "savechanges", "reload", "zoom", "caps", "find", "tabclosed", "rowclick", "calcbold",
+                    "currency", "sort", "undo"):
             print("  ", *e)
     if not quiet:
         for name, (kind, content) in D.disk.items():

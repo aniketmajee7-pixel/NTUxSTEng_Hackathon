@@ -5,7 +5,8 @@ what is on it:
   * `is_blank` - has the page painted yet (a loading tab is a flat white field)?
   * `text_spots` - text-like patches worth pointing at: a dense run of sharp light/dark
     transitions on a flat background; photos and flat panels are not.
-  * `consent_button` - the accept button of a cookie-consent modal.
+  * `consent_button` - the accept button of a consent modal: a dark panel with a mid-tone
+    button, or a bright centred card on a dimmed page (CNN's "Legal Terms and Privacy").
   * `warning_button` - the filled "Back to safety" button on Chrome's privacy warning; the
     caller looks for "Advanced" on the same row, at the left of the text column.
   * `same_view` - did a scroll move the page (the view is unchanged at the bottom)?
@@ -77,15 +78,18 @@ def text_spots(w, h, gray, cell=(12, 6), limit=24, sample=900, rng=None):
 
 
 def consent_button(w, h, gray):
-    """(x, y) of the accept button on a cookie-consent modal, or None.
-
-    Such a modal is a large dark panel; its button is a solid mid-tone (e.g. blue) block in
-    the panel's lower part, wide relative to the panel. Full-width dark page sections with a
-    small pill button don't qualify. The caller still checks the cursor turns into a hand
-    before clicking.
-    """
+    """(x, y) of the accept button on a consent modal, or None: a dark panel with a mid-tone
+    button (cookie banners), else a bright card on a dimmed page. The caller still checks the
+    cursor turns into a hand before clicking."""
     if not gray or h < 10:
         return None
+    return _panel_button(w, h, gray) or _card_button(w, h, gray)
+
+
+def _panel_button(w, h, gray):
+    """A large dark panel; its button is a solid mid-tone (e.g. blue) block in the panel's
+    lower part, wide relative to the panel. Full-width dark page sections with a small pill
+    button don't qualify."""
     dark_rows = [sum(1 for p in gray[y * w:(y + 1) * w] if p < 60) >= 0.25 * w
                  for y in range(h)]
     best, start = (0, 0), None
@@ -114,6 +118,75 @@ def consent_button(w, h, gray):
     if len(pts) < 20:
         return None
     return (sum(x for x, _ in pts) // len(pts), sum(y for _, y in pts) // len(pts))
+
+
+def _card(w, h, gray, bright=220, gap=45):
+    """(x0, y0, x1, y1, bg) of a bright dialog card sitting on a dimmed page, or None. The
+    card is the one tall run of rows holding a good share of near-white pixels, narrower than
+    the page, with margins on both sides (and above/below, where there is room) darker than it
+    by `gap`: an ordinary white page has no such margins."""
+    best, start = (0, 0), None
+    for y in range(h + 1):
+        lit = y < h and sum(1 for p in gray[y * w:(y + 1) * w] if p >= bright) >= 0.15 * w
+        if lit and start is None:
+            start = y
+        elif not lit and start is not None:
+            if y - start > best[1] - best[0]:
+                best = (start, y)
+            start = None
+    y0, y1 = best
+    if not 0.15 * h <= y1 - y0 <= 0.85 * h:
+        return None
+    cols = [sum(1 for y in range(y0, y1) if gray[y * w + x] >= bright) for x in range(w)]
+    xs = [x for x, n in enumerate(cols) if n >= 0.5 * (y1 - y0)]
+    if not xs:
+        return None
+    x0, x1 = min(xs), max(xs) + 1
+    if not 0.2 * w <= x1 - x0 <= 0.85 * w or x0 < 0.04 * w or w - x1 < 0.04 * w:
+        return None
+    lit = [gray[y * w + x] for y in range(y0, y1) for x in range(x0, x1) if gray[y * w + x] >= bright]
+    bg = sum(lit) / len(lit)
+
+    def mean(xa, xb, ya, yb):
+        px = [gray[y * w + x] for y in range(ya, yb) for x in range(xa, xb)]
+        return sum(px) / len(px)
+
+    margins = [mean(0, x0, y0, y1), mean(x1, w, y0, y1)]
+    if y0 >= 0.04 * h:
+        margins.append(mean(0, w, 0, y0))
+    if h - y1 >= 0.04 * h:
+        margins.append(mean(0, w, y1, h))
+    if max(margins) > bg - gap:
+        return None
+    return x0, y0, x1, y1, bg
+
+
+def _card_button(w, h, gray):
+    """The accept button of a bright card (see `_card`): the solid block of one flat tone in
+    the card's lower half - unlike text, which is thin strokes spread over a wide box. Of
+    several such blocks (Manage / Agree) the rightmost is taken, where the primary action
+    sits. A label inside the button just punches holes in the block."""
+    card = _card(w, h, gray)
+    if not card:
+        return None
+    x0, y0, x1, y1, bg = card
+    tones = {}
+    for y in range(y0 + (y1 - y0) * 45 // 100, y1 - 1):
+        for x in range(x0 + 1, x1 - 1):
+            p = gray[y * w + x]
+            if abs(p - bg) >= 60:
+                tones.setdefault(p >> 3, []).append((x, y))
+    found = []
+    for pts in tones.values():
+        if len(pts) < 25:
+            continue
+        xs, ys = sorted(x for x, _ in pts), sorted(y for _, y in pts)
+        k = len(pts) // 20                              # trim stray pixels off the box
+        bx0, bx1, by0, by1 = xs[k], xs[-1 - k], ys[k], ys[-1 - k]
+        wide, tall = bx1 - bx0 + 1, by1 - by0 + 1
+        if len(pts) >= 0.55 * wide * tall and wide >= 2 * tall and wide >= 0.1 * (x1 - x0):
+            found.append(((bx0 + bx1) // 2, (by0 + by1) // 2))
+    return max(found) if found else None
 
 
 def warning_button(w, h, gray, min_w=30, max_w=130, min_h=5):
@@ -291,6 +364,47 @@ def _consent_page(rng, w=320, h=200):
     return w, h, bytes(g), ((bx0 + bx1) // 2, (by0 + by1) // 2)
 
 
+def _consent_card_page(rng, w=320, h=200):
+    """A bright centred card on a page dimmed to ~45%: text lines, a flat button (blue or
+    black, with a light label punched in) bottom-right or centred, sometimes next to a quiet
+    outline button. Returns (w, h, gray, button centre)."""
+    g = bytearray([110] * (w * h))                      # the dimmed page
+    for _ in range(300):                                # its dimmed text
+        x, y = rng.randrange(w - 6), rng.randrange(h)
+        for xx in range(x, x + rng.randint(2, 6)):
+            g[y * w + xx] = 14
+    cx0, cx1 = rng.randint(55, 80), rng.randint(240, 265)
+    cy0, cy1 = rng.randint(20, 35), rng.randint(165, 180)
+    for yy in range(cy0, cy1):
+        for xx in range(cx0, cx1):
+            g[yy * w + xx] = 250
+    for line_y in range(cy0 + 14, cy0 + 80, 12):        # the card's text
+        for xx in range(cx0 + 15, cx1 - 15):
+            if rng.random() < 0.4:
+                for yy in range(line_y, line_y + 7):
+                    g[yy * w + xx] = 40
+    tone = rng.choice((35, 105, 140))                   # black / blue / grey fill
+    bw, bh = rng.randint(55, 70), rng.randint(16, 22)
+    bx1 = cx1 - 14 if rng.random() < 0.5 else (cx0 + cx1 + bw) // 2
+    bx0, by0 = bx1 - bw, cy1 - 14 - bh
+    for yy in range(by0, by0 + bh):
+        for xx in range(bx0, bx1):
+            g[yy * w + xx] = tone
+    for xx in range(bx0 + 14, bx1 - 14):                # "Agree": light dashes on the fill
+        if rng.random() < 0.6:
+            for yy in range(by0 + bh // 2 - 3, by0 + bh // 2 + 3):
+                g[yy * w + xx] = 245
+    if bx0 - 90 > cx0 + 10 and rng.random() < 0.5:      # an outline "Manage": border only
+        ox0 = bx0 - 80
+        for xx in range(ox0, ox0 + 65):
+            for yy in (by0, by0 + bh - 1):
+                g[yy * w + xx] = 90
+        for yy in range(by0, by0 + bh):
+            for xx in (ox0, ox0 + 64):
+                g[yy * w + xx] = 90
+    return w, h, bytes(g), ((bx0 + bx1 - 1) // 2, (by0 + by0 + bh - 1) // 2)
+
+
 def _warning_page(rng, w=640, h=380):
     """Chrome's privacy warning at 1/2 scale: heading/text lines, Advanced, a blue button."""
     g = bytearray([255] * (w * h))
@@ -314,9 +428,17 @@ def _warning_page(rng, w=640, h=380):
     return w, h, bytes(g), (bx1 - 75, bx1, by + 9)
 
 
-def _calc_window(rng, w=1280, h=800, sel=(0, 0)):
+# The selected headers on the VM (HANDOFF section 6, 10 Oct): blue from (97,168,233) to
+# (60,120,212). As (gray, blue-minus-red) that is (166, 136) to (128, 152); the grab turns
+# colour into gray as (b + 2g + r) / 4.
+LIT_LIGHT, LIT_DARK = (166, 136), (128, 152)
+
+
+def _calc_window(rng, w=1280, h=800, sel=(0, 0), lit=(LIT_LIGHT, LIT_DARK)):
     """An AOO Calc window: blue toolbar icon, header bands with separators and labels, the
-    selected cell's headers lit. Returns (w, h, gray, blue, truth)."""
+    selected cell's headers lit - `lit` gives the (gray, blue) of the top and bottom rows of
+    each lit header, with a gradient between (equal ends: a flat fill). Returns
+    (w, h, gray, blue, truth)."""
     g, bl = bytearray([240] * (w * h)), bytearray(w * h)
     x0, y0 = rng.randint(30, 45), rng.randint(130, 160)  # A1's top-left
     cw, rh = rng.choice((81, 80, 88)), rng.choice((17, 18))
@@ -327,19 +449,29 @@ def _calc_window(rng, w=1280, h=800, sel=(0, 0)):
             for xx in range(xa, xb):
                 g[yy * w + xx], bl[yy * w + xx] = v, b
 
+    def lit_fill(xa, xb, ya, yb):                       # a lit header: gradient top to bottom
+        (g0, b0), (g1, b1) = lit
+        for yy in range(ya, yb):
+            f = (yy - ya) / max(1, yb - ya - 1)
+            fill(xa, xb, yy, yy + 1, round(g0 + (g1 - g0) * f), round(b0 + (b1 - b0) * f))
+
     fill(300, 316, 60, 76, 110, 120)                    # a blue toolbar icon (decoy)
     for yy in range(y0, h - 40):                        # white sheet with light gridlines
         for xx in range(x0, w):
             g[yy * w + xx] = 192 if (xx - x0) % cw == cw - 1 or (yy - y0) % rh == rh - 1 else 255
     ncol, nrow = (w - x0) // cw, (h - 40 - y0) // rh
     for c in range(ncol):
-        lit = c == sel[0]
-        fill(x0 + c * cw, x0 + c * cw + cw - 1, hy0, y0, 127 if lit else 240, 146 if lit else 0)
-        fill(x0 + c * cw + cw - 1, x0 + c * cw + cw, hy0, y0, 105)          # separator
+        if c == sel[0]:
+            lit_fill(x0 + c * cw, x0 + c * cw + cw - 1, hy0, y0)
+        else:
+            fill(x0 + c * cw, x0 + c * cw + cw - 1, hy0, y0, 240)
+        fill(x0 + c * cw + cw - 1, x0 + c * cw + cw, hy0, y0, 105)              # separator
         fill(x0 + c * cw + cw // 2 - 3, x0 + c * cw + cw // 2 + 3, hy0 + 5, y0 - 4, 20)  # letter
     for r in range(nrow):
-        lit = r == sel[1]
-        fill(0, x0 - 1, y0 + r * rh, y0 + r * rh + rh - 1, 127 if lit else 240, 146 if lit else 0)
+        if r == sel[1]:
+            lit_fill(0, x0 - 1, y0 + r * rh, y0 + r * rh + rh - 1)
+        else:
+            fill(0, x0 - 1, y0 + r * rh, y0 + r * rh + rh - 1, 240)
         fill(0, x0 - 1, y0 + r * rh + rh - 1, y0 + r * rh + rh, 105)
         fill(x0 // 2 - 3, x0 // 2 + 3, y0 + r * rh + 4, y0 + r * rh + rh - 4, 20)       # digit
     return w, h, bytes(g), bytes(bl), (x0, y0, cw, rh)
@@ -367,6 +499,12 @@ def selftest(trials=20):
         consent_ok &= spot is not None and abs(spot[0] - bx) <= 6 and abs(spot[1] - by) <= 4
         w, h, g, _ = _synthetic(rng)
         consent_ok &= consent_button(w, h, g) is None   # ordinary page: nothing to click
+    for _ in range(12):                                 # a bright centred card on a dimmed page
+        w, h, g, (bx, by) = _consent_card_page(rng)
+        spot = consent_button(w, h, g)
+        consent_ok &= spot is not None and abs(spot[0] - bx) <= 6 and abs(spot[1] - by) <= 4
+        w, h, g, _ = _warning_page(rng)
+        consent_ok &= consent_button(w, h, g) is None   # a white page with one button: no modal
     warning_ok = True
     for _ in range(5):
         w, h, g, (x0, x1, y) = _warning_page(rng)
@@ -378,14 +516,15 @@ def selftest(trials=20):
         w, h, g, _ = _consent_page(rng)
         warning_ok &= warning_button(w, h, g) is None
     grid_ok = True
-    for seed in range(3):
-        w, h, g, bl, (x0, y0, cw, rh) = _calc_window(random.Random(seed))
+    for seed, lit in ((0, (LIT_LIGHT, LIT_LIGHT)), (1, (LIT_DARK, LIT_DARK)), (2, (LIT_LIGHT, LIT_DARK)),
+                      (3, (LIT_DARK, LIT_LIGHT))):      # both ends of the VM's blue, and between
+        w, h, g, bl, (x0, y0, cw, rh) = _calc_window(random.Random(seed), lit=lit)
         got = calc_grid(w, h, g, bl)
         grid_ok &= got is not None and (got["x0"], got["y0"], got["cw"], got["rh"]) == \
             (x0, y0, cw, rh) and got["ncol"] >= 10 and got["nrow"] >= 20
         if not got:
             continue
-        w, h, g, bl, _ = _calc_window(random.Random(seed), sel=(1, 2))     # B3 selected
+        w, h, g, bl, _ = _calc_window(random.Random(seed), sel=(1, 2), lit=lit)    # B3 selected
         grid_ok &= calc_grid(w, h, g, bl) is None       # needs A1 lit to calibrate
         hy, sx = got["hy"], got["sx"]
         grid_ok &= highlighted(bl[hy * w:(hy + 1) * w], x0, cw, got["ncol"]) == [1]

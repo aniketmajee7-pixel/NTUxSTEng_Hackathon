@@ -11,8 +11,8 @@ Input is injected through Win32 `SendInput` using only the Python standard libra
 | `agent/agent.py` | The workday planner: interleaves the research goal with ambient tasks (Markov), 15+ min |
 | `agent/agent.pyw` | The real entry point: runs the planner under pythonw (no console window) |
 | `agent/research_task.py` | The research goal as dependent steps: shops → notes → sheet → reopen + finish → memo |
-| `agent/office_loop.py` | Writer status update, Calc costing sheet (cells picked by mouse when the grid is found, total read back via clipboard), Impress deck (flagged) |
-| `agent/web_loop.py` | Chrome on the mock sites: read, follow real links (cursor = hand), copy real words (cursor = I-beam) |
+| `agent/office_loop.py` | Writer status update, Calc costing sheet (cells picked by mouse when the grid is found, total read back via clipboard, bold header/currency), Impress deck (flagged) |
+| `agent/web_loop.py` | Chrome on the mock sites: read, follow real links (cursor = hand), copy real words (cursor = I-beam), Ctrl+F lookups, save a page |
 | `agent/desk_tasks.py` | To-dos in the scratch Notepad, a look over Documents in File Explorer |
 | `agent/session.py` | The day's long-lived Chrome / OpenOffice / Notepad; save, reopen, recover, bounded teardown |
 | `agent/human_input.py` | Win32 input: `SendInput` playback, focus, window lookup, `launch()` via Win+R, operator-abort |
@@ -55,6 +55,9 @@ Preflight before the graded run:
 4. Procmon filters `Process Name is pythonw.exe` + `Operation is WriteFile`, and Process Create,
    stay empty for the first minute.
 5. Process Explorer shows explorer.exe -> pythonw.exe, and explorer.exe -> chrome / soffice.
+6. Keep the Mac mouse still and outside the noVNC console window. A pointer resting over the
+   console moves the VM pointer; to the agent that looks like a takeover, so it pauses (and
+   stops if the pointer is left in the top-left corner).
 
 On a dev machine (no VM needed):
 

@@ -16,8 +16,8 @@ import timing
 import vision
 from screen import poll
 from content import WorldState
-from human_input import (nap, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_F4, VK_MENU,
-                         VK_RETURN, VK_SHIFT, click, disable_quickedit, ensure_focus,
+from human_input import (nap, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_F4, VK_LEFT,
+                         VK_MENU, VK_RETURN, VK_SHIFT, click, disable_quickedit, ensure_focus,
                          find_window, find_windows, focus, foreground, hold_key, hotkey,
                          is_window, launch, maximize, move_to, tap, type_text,
                          wait_for_new_window, wait_for_window, wait_title, window_title)
@@ -178,12 +178,18 @@ class Session:
         Returns the Chrome hwnd, or None if the site is no use today: a privacy warning with
         no way past it, or a page that never paints. Such a host is remembered and not typed
         again this run (VM: coinbase/amazon/coursera stuck on the warning, dell and
-        coinmarketcap blank).
+        coinmarketcap blank), and the tab is left (`leave_page`) so the next visit does not
+        start from its title.
         """
         if host in self.dead_sites:
             return None
         hwnd = self.ensure_chrome()
         focus(hwnd)
+        if not new_tab and WARNING in window_title(hwnd):
+            # a warning still up (a task cut short, a page we could not leave): typing over
+            # it would leave the title unchanged if the next site warns too
+            if not self.leave_page(hwnd, False):
+                new_tab = True                          # a fresh tab has no warning to mistake
         if new_tab:
             hotkey(VK_CONTROL, ord("T"))                # a new tab already focuses the omnibox
             self.tabs += 1
@@ -214,16 +220,43 @@ class Session:
             painted = screen.wait_painted(hwnd)         # same title: this site was already up
         if WARNING in window_title(hwnd):
             if not self.pass_warning(hwnd):
-                self.dead_sites.add(host)
-                return None
+                return self.give_up(hwnd, host, new_tab)
             painted = screen.wait_painted(hwnd)
         if not painted:
             nap(timing.read_s(6))                # stare at the empty page, give up
-            self.dead_sites.add(host)
-            return None
+            return self.give_up(hwnd, host, new_tab)
         nap(timing.perceive_s() + timing.read_s(8))
         self.accept_cookies(hwnd)
         return hwnd
+
+    def give_up(self, hwnd, host, new_tab):
+        """`host` is no use today: remember it, get off its page, report None."""
+        self.dead_sites.add(host)
+        self.leave_page(hwnd, new_tab)
+        return None
+
+    def leave_page(self, hwnd, opened_tab):
+        """Get off a page we have given up on (a privacy warning, a blank page): Ctrl+W if
+        `opened_tab` (this visit opened its tab; the one before comes back), else Alt+Left.
+        Alt+Left is judged by the title, and Ctrl+W is tried after it if Back did nothing.
+        True once another page is in front."""
+        gone = window_title(hwnd)
+        for close in ((True, False) if opened_tab else (False, True)):
+            if close and self.tabs < 2:
+                continue                                # never Ctrl+W the last tab: window closes
+            nap(timing.think_s(0.6))                    # "forget it"
+            ensure_focus(hwnd)
+            if close:
+                # Ctrl+W on a tab that isn't the last always closes it, even when the tab
+                # behind has the same title: count it, and never follow up with Alt+Left
+                hotkey(VK_CONTROL, ord("W"))
+                self.tabs -= 1
+                wait_title(hwnd, lambda t: t != gone, 6)
+                return True
+            hotkey(VK_MENU, VK_LEFT)
+            if wait_title(hwnd, lambda t: t != gone, 6):
+                return True
+        return False
 
     def pass_warning(self, hwnd):
         """Chrome's "Your connection is not private": Advanced, then "Proceed to <host>

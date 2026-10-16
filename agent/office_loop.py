@@ -13,6 +13,7 @@ Files are saved to Documents as native .odt/.ods/.odp (no format dialog to trip 
 import sys
 sys.dont_write_bytecode = True  # no __pycache__/*.pyc from python.exe (EID 11)
 
+import re
 import time
 
 import screen
@@ -21,7 +22,8 @@ import vision
 from content import fresh, sentence, world_sentence
 from human_input import (nap, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_HOME, VK_MENU,
                          VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP, click, click_in,
-                         ensure_focus, hold_chord, hold_key, hotkey, move_to, tap, type_text)
+                         ensure_focus, find_window, focus, hold_chord, hold_key, hotkey, move_to, tap,
+                         type_text, wait_for_window)
 from session import run_standalone
 
 # plausible SGD unit prices per item, with retail-style endings (.99/.95/.00): a laptop is
@@ -124,17 +126,23 @@ def calibrate(session, hwnd):
             print("    Calc grid not found; cells by keyboard", flush=True)
 
 
-def selected_cell(grid):
-    """(col, row) whose column and row headers are lit right now, or None (two 1-px grabs).
-    Positions only, not labels: a scrolled view would read as the clicked screen cell, so
-    `goto_cell(home=True)` re-anchors the view at A1 first wherever that isn't certain."""
+def lit_headers(grid):
+    """([column indices], [row indices]) whose headers are lit right now (two 1-px grabs).
+    One cell selected: one of each; a range or a whole row: several."""
     l, t = grid["left"], grid["top"]
     right = l + grid["x0"] + grid["cw"] * grid["ncol"]
     _, _, _, line = screen.grab_planes((l, t + grid["hy"], right, t + grid["hy"] + 1))
     cols = vision.highlighted(line, grid["x0"], grid["cw"], grid["ncol"])
     bottom = t + grid["y0"] + grid["rh"] * grid["nrow"]
     _, _, _, side = screen.grab_planes((l + grid["sx"], t, l + grid["sx"] + 1, bottom))
-    rows = vision.highlighted(side, grid["y0"], grid["rh"], grid["nrow"])
+    return cols, vision.highlighted(side, grid["y0"], grid["rh"], grid["nrow"])
+
+
+def selected_cell(grid):
+    """(col, row) whose column and row headers are lit right now, or None. Positions only,
+    not labels: a scrolled view would read as the clicked screen cell, so
+    `goto_cell(home=True)` re-anchors the view at A1 first wherever that isn't certain."""
+    cols, rows = lit_headers(grid)
     return (cols[0], rows[0]) if len(cols) == 1 and len(rows) == 1 else None
 
 
@@ -180,17 +188,30 @@ def read_cell():
     return value
 
 
+# a number as Calc displays it: plain, or currency such as $1,260.00, S$1,260.00, -$5.00, ($5.00)
+_SHOWN = re.compile(r"\(?-?(?:[A-Z]{0,3}\$|[A-Z]{3}\s)?-?(\d[\d,]*(?:\.\d+)?|\.\d+)\)?")
+
+
+def parse_number(text):
+    """The number a Calc cell shows (`text` as read back by Ctrl+C), or None if it isn't one
+    - "Yes", "Err:509" and "#VALUE!" are not numbers, whatever digits they hold."""
+    text = text.strip()
+    m = _SHOWN.fullmatch(text)
+    if not m:
+        return None
+    value = float(m.group(1).replace(",", ""))
+    return -value if text.startswith("(") or "-" in text else value
+
+
 def check_cell(session, hwnd, expected, retype, tol=0.01):
     """Read the current Calc cell back via the clipboard; if it isn't `expected`, retype the
     formula once (Enter moves down, so step back up) and re-check. Returns True if it matched."""
     for attempt in range(2):
         ensure_focus(hwnd)
         got = read_cell()
-        try:
-            if abs(float(got.replace(",", "")) - expected) <= tol:
-                return True
-        except ValueError:
-            pass
+        value = parse_number(got)
+        if value is not None and abs(value - expected) <= tol:
+            return True
         print(f"    cell shows {got!r}, expected {expected}; "
               f"{'retyping' if attempt == 0 else 'leaving it'}", flush=True)
         if attempt == 0:
@@ -224,6 +245,101 @@ def paste_down(session, hwnd, col, src_row, first, last):
     hotkey(VK_CONTROL, ord("V"))
     nap(timing.think_s(0.6))
     goto_cell(session, hwnd, 0, last)
+
+
+def select_block(session, hwnd, col, row, ncols, nrows):
+    """Select ncols x nrows cells from (col, row), 0-based: go to the first cell, then
+    Shift+Down and Shift+Right (extended arrows; the range grows from the cursor cell)."""
+    goto_cell(session, hwnd, col, row)
+    ensure_focus(hwnd)
+    if nrows > 1:
+        hold_chord(VK_SHIFT, VK_DOWN, nrows - 1)
+    if ncols > 1:
+        hold_chord(VK_SHIFT, VK_RIGHT, ncols - 1)
+    nap(timing.short_s(0.3))
+
+
+def bold_header(session, hwnd, ncols):
+    """Bold the header row. Half the time, when the grid is known, a click on row header 1
+    (the whole row; the lit headers confirm it); otherwise A1 and Shift+Right over the
+    `ncols` header cells. Then Ctrl+B."""
+    grid, rng = session.calc_grid, session.rng
+    whole = False
+    if grid and screen.window_rect(hwnd) == grid["rect"] and rng.random() < 0.5:
+        x = grid["left"] + grid["sx"] + rng.uniform(2, max(3, grid["x0"] - grid["sx"] - 5))
+        y = grid["top"] + grid["y0"] + grid["rh"] * rng.uniform(0.3, 0.7)
+        ensure_focus(hwnd)
+        move_to(int(x), int(y))
+        nap(timing.think_s(0.25))
+        click()
+        nap(timing.short_s(0.25))
+        cols, rows = lit_headers(grid)
+        whole = rows == [0] and len(cols) >= grid["ncol"] - 1
+        if not whole:
+            print("    row header click missed; selecting by keyboard", flush=True)
+    if not whole:
+        select_block(session, hwnd, 0, 0, ncols, 1)
+    ensure_focus(hwnd)
+    hotkey(VK_CONTROL, ord("B"))
+    nap(timing.think_s(0.6))
+
+
+def currency_format(session, hwnd, col, first, last):
+    """Currency format (Ctrl+Shift+4) on the data cells of column `col` (0-based), sheet rows
+    first..last. Cells then read back as "$1,260.00" (see `parse_number`)."""
+    select_block(session, hwnd, col, first - 1, 1, last - first + 1)
+    ensure_focus(hwnd)
+    hotkey(VK_CONTROL, VK_SHIFT, ord("4"))
+    nap(timing.think_s(0.6))
+
+
+def sort_dialog(session, hwnd, letter, col, row):
+    """Sort the block around cell (col, row) by the column whose header starts with `letter`:
+    Alt+D, S opens the Sort dialog (waited for by its exact title), the "Sort key 1" list has
+    focus so the letter picks the header, Enter, wait for the dialog to close. Needs a table
+    with a header row and no neighbouring data. VM: Alt+D, S, letter, Enter worked. Returns
+    False if the dialog never appeared (menu closed again) or would not close (cancelled)."""
+    goto_cell(session, hwnd, col, row)
+    ensure_focus(hwnd)
+    hotkey(VK_MENU, ord("D"))
+    nap(timing.short_s(0.5))
+    tap(ord("S"))
+    try:
+        dlg = wait_for_window("Sort", timeout=5, exact=True)
+    except TimeoutError:
+        for _ in range(2):                              # close the menu; nothing may stay typed
+            tap(VK_ESCAPE)
+            nap(timing.short_s(0.3))
+        return False
+    ensure_focus(dlg)
+    nap(timing.read_s(8))                               # look at the dialog
+    tap(ord(letter.upper()))
+    nap(timing.think_s(0.6))
+    tap(VK_RETURN)
+    try:
+        wait_for_window("Sort", timeout=8, gone=True, exact=True)
+    except TimeoutError:                                # still open: cancel it, don't block the run
+        dlg = find_window("Sort", exact=True)
+        if dlg:
+            focus(dlg)
+            tap(VK_ESCAPE)
+            nap(timing.think_s(0.6))
+        return False
+    return True
+
+
+POLISH = 0.6        # each finishing touch (bold header, currency, sort) is done this often
+
+
+def polish(session, steps):
+    """A person who has just typed a table often tidies it, in no fixed order and not always:
+    run each of `steps` (callables) with probability POLISH, shuffled. True if any ran."""
+    rng = session.rng
+    chosen = [st for st in steps if rng.random() < POLISH]
+    rng.shuffle(chosen)
+    for st in chosen:
+        st()
+    return bool(chosen)
 
 
 def move_cursor(dx=0, dy=0):
@@ -277,6 +393,9 @@ def calc_task(session):
     if paste:
         paste_down(session, hwnd, 3, 2, 3, len(rows) + 1)   # ends at A{total_row}, below the data
     total_row = len(rows) + 2
+    if polish(session, [lambda: bold_header(session, hwnd, 4),
+                        lambda: currency_format(session, hwnd, 2, 2, len(rows) + 1)]):
+        goto_cell(session, hwnd, 0, total_row - 1)      # back to the first empty row
     sum_formula = f"=SUM(D2:D{total_row - 1})"
     enter_cells(hwnd, "Total", "", "", sum_formula)    # cursor now at A{total_row + 1}
     nap(timing.read_s(15))
