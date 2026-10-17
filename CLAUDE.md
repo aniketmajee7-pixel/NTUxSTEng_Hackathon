@@ -85,5 +85,5 @@ Layered, with the timing/geometry/pixel math kept pure so the offline harnesses 
 
 ## Repo rules
 
-- The GitHub repo (`aniketmajee7-pixel/NUSxSTEng_Hackathon`) is private (confirmed 12 Oct 2026); keep it so.
+- The GitHub repo (`aniketmajee7-pixel/NTUxSTEng_Hackathon`, renamed from `NUSxSTEng_Hackathon`; the old URL redirects) is private (confirmed 17 Oct 2026); keep it so.
 - `agent/` is the main implementation. `legacy/desktop-demo/` is the teammates' earlier pyautogui line, kept for reference and its tests (`cd legacy/desktop-demo && python3 -m unittest discover -s tests`); don't ship it to the VM.
