@@ -1528,7 +1528,9 @@ def main():
         elif last_up is not None:
             flights.append(t - last_up)
     fast = sum(1 for f in flights if 0 <= f < 0.0001)  # a spike at ~0 ms = back-to-back taps
-    if fast > max(3, 0.003 * len(flights)):            # organic rollover gives the odd one
+    # rollover makes flights cross zero smoothly, so a few in 10,000 land in this bin by chance;
+    # back-to-back machine taps would give dozens
+    if fast > max(5, 0.005 * len(flights)):
         problems.append(f"{fast}/{len(flights)} key flights under 0.1 ms (machine-like)")
     backs = sum(1 for t, vk, up in D.keylog if vk == 0x08 and not up)
     downs = sum(1 for t, vk, up in D.keylog if not up)

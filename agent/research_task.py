@@ -326,7 +326,7 @@ class Research:
     """The laptop-research goal as a set of steps with dependencies (see module docstring)."""
 
     # seconds per step, measured on the fake desktop (tools/fake_desktop.py)
-    EST = {"visit": 90, "start_sheet": 140, "finish_sheet": 70, "memo": 190, "notes": 15}
+    EST = {"visit": 90, "start_sheet": 115, "finish_sheet": 50, "memo": 280, "notes": 12}
 
     def __init__(self, session):
         rng = session.rng

@@ -163,7 +163,7 @@ def goto_cell(session, hwnd, col, row, home=False):
         nap(timing.short_s(0.3))
     if grid and col < grid["ncol"] - 1 and row < grid["nrow"] - 1:
         x = grid["left"] + grid["x0"] + grid["cw"] * (col + rng.uniform(0.25, 0.7))
-        y = grid["top"] + grid["y0"] + grid["rh"] * (row + rng.uniform(0.3, 0.7))
+        y = grid["top"] + grid["y0"] + grid["rh"] * (row + rng.uniform(0.38, 0.62))   # rows are thin: aim mid-height
         move_to(int(x), int(y))
         nap(timing.think_s(0.25))
         click()
