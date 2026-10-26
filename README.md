@@ -64,8 +64,10 @@ window). It never calls `subprocess`, `os.startfile` or COM to launch anything.
   irregular spacing.
 - **Pauses.** Every pause between actions (hovering before a click, reading a page,
   glancing at the source list) is drawn from a lognormal distribution, so most are
-  short and a few run long, the long tail seen in studies of how long people stay on
-  web pages.
+  short and a few run long. Studies of how long people stay on web pages show the
+  same long tail (Liu et al., 2010, fit it with a Weibull). A flat random range would
+  not do: chat bots with uniformly random delays were still detected by entropy tests
+  on their message timing (Gianvecchio et al., 2008).
 - **Typing.** Gaps depend on the next key: 0.12–0.30 s between letters, 0.25–0.65 s
   after a space, 0.35–0.95 s before a symbol. Each word gets its own pace, capitals use
   a real held Shift, and slips land only on neighbouring QWERTY keys before being
@@ -181,6 +183,19 @@ python3 -B -m unittest discover -s tests
 - Grid reading is tuned to the VM's 1280×800 screen and Calc's default theme. If the
   grid can't be read, the agent falls back to the keyboard.
 
+## Related work
+
+CMU SEI's GHOSTS (Updyke et al., 2018) is the best-known synthetic-user framework. Its
+open-source Windows client launches Office through COM and the browser through
+Selenium, so a reviewer sees the automation process, not Explorer, as the parent, and
+it enters text in a single call rather than key by key.
+Detection research on browser agents (Choudhary et al., 2026) finds that automation
+driven through the page lacks the raw pointer and wheel streams real input produces.
+This agent therefore drives the real desktop with OS-level mouse and keyboard input,
+starts every app from its icon, and times each key, click and pause like a person.
+Activity simulators are judged on when actions happen as much as what they are
+(Lamp et al., 2025), which is why timing gets as much care here as the tasks.
+
 ## References
 
 - Fitts, P. M. (1954). The information capacity of the human motor system in controlling
@@ -190,6 +205,27 @@ python3 -B -m unittest discover -s tests
 - Dhakal, V., Feit, A. M., Kristensson, P. O. & Oulasvirta, A. (2018). Observations on
   typing from 136 million keystrokes. *CHI 2018*.
 - Nielsen, J. (2011). How long do users stay on web pages? Nielsen Norman Group.
+- Liu, C., White, R. W. & Dumais, S. (2010). Understanding web browsing behaviors
+  through Weibull analysis of dwell time. *SIGIR 2010*.
+- Gianvecchio, S., Xie, M., Wu, Z. & Wang, H. (2008). Measurement and classification of
+  humans and bots in Internet chat. *USENIX Security 2008*.
+- Updyke, D. D., Dobson, G. B., Podnar, T. G., Osterritter, L., Earl, B. L. & Cerini,
+  A. D. (2018). GHOSTS in the Machine: A framework for cyber-warfare exercise NPC
+  simulation. *CMU/SEI-2018-TR-005*, Carnegie Mellon University.
+- Choudhary, V., Schmidt, L., Kenntner, A. Z., Skhab, F., Osswald, M. & Ernstberger, J.
+  (2026). What does it take to detect an AI agent? Minimal feature sets for behavioral
+  detection under browser automation. *arXiv:2607.26935*.
+- Lamp, S., Hiser, J. D., Nguyen-Tuong, A. & Davidson, J. W. (2025). PHASE: Passive
+  human activity simulation evaluation. *arXiv:2507.13505*.
+
+## Built with
+
+- [PyAutoGUI](https://pyautogui.readthedocs.io/) for pointer and keyboard input.
+- [pywinauto](https://pywinauto.readthedocs.io/) for reading window and control state
+  through UI Automation.
+- [pywin32](https://pypi.org/project/pywin32/) for Win32 calls: window handles, key
+  state, the clipboard and screen capture.
+- The Python standard library, including tkinter for the launcher.
 
 ## Team 21
 
