@@ -13,6 +13,7 @@ It also models what broke the recorded runs, so the same mistakes fail here firs
   cells (second recording: values typed after a paste all landed on the pasted cell)."""
 import os
 import re
+import time
 import zipfile
 from pathlib import Path
 from unittest.mock import Mock
@@ -133,16 +134,25 @@ class SimGUI:
 
 class SimCalc:
     def __init__(self, folder, time_up, grid=True, shift_arrows=True, sort='works',
-                 documents_listed=True, file_menu='works', ctrl_s=True):
+                 parent_listed=True, file_menu='works', ctrl_s=True, address_bar=True,
+                 dialog_starts='elsewhere', stale_copy=False):
         # file_menu: 'works'; 'unseen' (it opens, but no new window can be detected);
         # 'dead' (S does nothing).  ctrl_s=False: the shortcut does not reach Calc.
+        # parent_listed=False: Desktop is not in the Save dialog's left pane.
+        # address_bar=False: the dialog's address bar cannot be read.
+        # dialog_starts: the folder the Save dialog opens in: 'agent' (Windows reopens the
+        # folder used last), 'desktop' or 'elsewhere' (Documents).
+        # stale_copy: a file of the same name already sits in that folder, so saving there
+        # makes Windows ask "Confirm Save As".
         self.file_menu, self.ctrl_s = file_menu, ctrl_s
         self.menu_saves = 0
         self.closing = False                       # "Do you want to save your changes?"
-        self.folder = Path(folder)                 # ...\Documents\HackathonDemo
+        self.folder = Path(folder)                 # ...\Desktop\agent
         self.time_up = time_up
         self.grid_visible, self.shift_arrows, self.sort_mode = grid, shift_arrows, sort
-        self.documents_listed = documents_listed
+        self.parent_listed, self.address_bar = parent_listed, address_bar
+        self.stale_copy = stale_copy
+        self.confirm = None                        # "Confirm Save As": the file waiting to be written
         self.cells, self.currency, self.bold_rows = {}, set(), set()
         self.anchor = self.cursor = (0, 1)
         self.block = None                          # a marked range (c1, r1, c2, r2), if any
@@ -156,8 +166,10 @@ class SimCalc:
         self.menu = self.dialog = self.question = None
         self.sort_field = None
         self.field, self.field_selected = '', False
-        self.dialog_folder = self.folder/'20261008-142443-09ab12'    # where the last run saved
+        self.dialog_folder = {'agent': self.folder, 'desktop': self.folder.parent}.get(
+            dialog_starts, self.folder.parent.parent/'Documents')
         self.saved_as = None
+        self.written = set()                       # files this Calc wrote
         self.saves = 0
         self.dirty = self.closed = False
         self.errors, self.events, self.keys = [], [], []
@@ -167,8 +179,16 @@ class SimCalc:
         self.clock = 0.0
         self.window = self.rectangle_mock(Mock(handle=1), 0, 0, 1280, 752)
         self.save_dialog, self.find_dialog = Mock(handle=3), Mock(handle=4)
-        self.controls = {name: Mock(name=name) for name in ('documents', 'folder', 'field', 'save')}
+        self.save_dialog.descendants.side_effect = self.dialog_controls
+        self.controls = {name: Mock(name=name) for name in ('parent', 'folder', 'field', 'save')}
         self.gui = SimGUI(self, self.folder/'run-now')
+
+    def dialog_controls(self, control_type=None):
+        """What UI Automation lists in the Save dialog: the address bar (when readable)."""
+        if control_type == 'ToolBar' and self.address_bar:
+            bar = Mock(); bar.window_text.return_value = f'Address: {self.dialog_folder}'
+            return [bar]
+        return []
 
     @staticmethod
     def rectangle_mock(window, left, top, right, bottom):
@@ -307,6 +327,13 @@ class SimCalc:
 
     def press(self, key):
         self.keys.append(key)
+        if self.confirm is not None:               # Windows: "... already exists. Replace it?"
+            target, self.confirm = self.confirm, None
+            if key == 'y':
+                self.saved_as = target; self.dialog = None; self.save()
+            elif key != 'n':
+                self.errors.append(f'key {key!r} at the Confirm Save As question')
+            return                                 # No: the Save dialog stays open
         if self.closing:
             self.closing = False
             if key == 'enter':                     # Save is the default button
@@ -571,6 +598,8 @@ class SimCalc:
             titles[5] = 'Sort'
         if self.question or self.closing:
             titles[6] = 'OpenOffice 4.1.16'
+        if self.confirm is not None:
+            titles[7] = 'Confirm Save As'
         return titles
 
     def handles(self, pattern=None):
@@ -586,8 +615,8 @@ class SimCalc:
     def find_control(self, window, names, kind):
         if window is not self.save_dialog or self.dialog != 'Save As':
             return None
-        if kind == 'TreeItem' and 'Documents' in names and self.documents_listed:
-            return self.controls['documents']
+        if kind == 'TreeItem' and self.folder.parent.name in names and self.parent_listed:
+            return self.controls['parent']
         if kind == 'ListItem' and self.folder.name in names and self.dialog_folder == self.folder.parent:
             return self.controls['folder']
         if kind == 'Edit' and any(name.startswith('File name') for name in names):
@@ -597,12 +626,20 @@ class SimCalc:
         return None
 
     def click_control(self, control, double):
-        if control is self.controls['documents']:
+        if control is self.controls['parent']:
             self.dialog_folder = self.folder.parent
         elif control is self.controls['folder'] and double:
             self.dialog_folder = self.folder
         elif control is self.controls['save']:
-            self.saved_as = self.dialog_folder/self.field
+            target = self.dialog_folder/self.field     # a full path typed in the field wins
+            if (self.stale_copy and Path(self.field).name == self.field
+                    and self.dialog_folder != self.folder and not target.exists()):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('an older run')      # a copy of that name left by an earlier run
+            if target.exists():
+                self.confirm = target                  # Windows asks before replacing a file
+                return
+            self.saved_as = target
             self.dialog = None
             self.save()
 
@@ -620,7 +657,9 @@ class SimCalc:
         with zipfile.ZipFile(self.saved_as, 'w') as package:
             package.writestr('content.xml', '<sheet/>')
         self.saves += 1
-        os.utime(self.saved_as, (1_700_000_000+self.saves, 1_700_000_000+self.saves))
+        self.written.add(self.saved_as)
+        stamp = time.time()+self.saves                 # a fresh file, each save newer than the last
+        os.utime(self.saved_as, (stamp, stamp))
         self.dirty = False
 
     def close(self):

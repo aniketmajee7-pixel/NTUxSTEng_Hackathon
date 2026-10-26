@@ -48,14 +48,14 @@ class SpreadsheetFlowTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         modules = {'pyautogui': pg, 'win32gui': types.ModuleType('win32gui'), 'gui_support': support}
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
-        folder = Path(temp.name)/'Documents'/'HackathonDemo'
-        (folder/'run-now').mkdir(parents=True)
+        folder = Path(temp.name)/'Desktop'/'agent'          # where main.py is: Desktop\\agent
+        folder.mkdir(parents=True)
         sim = SimCalc(folder, support.TimeUp, **sim_options)
         pg.keyDown = lambda key: setattr(sim, 'shift', True) if key == 'shift' else None
         pg.keyUp = lambda key: setattr(sim, 'shift', False) if key == 'shift' else None
         pg.size = lambda: (1280, 800)
         settings = {'calc_shortcut': 'OpenOffice Calc', 'spreadsheet_typo_scale': 0,
-                    'calc_wrap_up_seconds': 20, **(config or {})}
+                    'calc_wrap_up_seconds': 20, 'save_folder': str(folder), **(config or {})}
         random.seed(seed)
         with patch.dict(sys.modules, modules):
             spec.loader.exec_module(module)
@@ -119,16 +119,48 @@ class SpreadsheetFlowTests(unittest.TestCase):
     def test_save_as_types_a_bare_file_name_into_the_clicked_folder(self):
         sim, inv, result = self.run_flow(1)
         self.assertRegex(sim.field, r'^inventory_[a-z]{3}\d\d\.ods$')
-        self.assertEqual(sim.saved_as.parent, sim.folder)               # ...\Documents\HackathonDemo
+        self.assertEqual(sim.saved_as.parent, sim.folder)               # ...\Desktop\agent
+        self.assertEqual(sim.saved_as.parent.name, 'agent')
         self.assertEqual(result['saved_path'], str(sim.saved_as))
-        self.assertEqual(self.events(sim, 'save_folder_browsed')[0]['clicks'], 2)
+        self.assertEqual(self.events(sim, 'save_folder_browsed')[0]['clicks'], 2)   # Desktop, then agent
+        self.assertEqual(self.events(sim, 'save_folder_typed'), [])
 
-    def test_file_is_still_found_when_documents_is_not_in_the_dialog(self):
-        sim, inv, result = self.run_flow(2, documents_listed=False)
+    def test_if_the_dialog_already_shows_the_agent_folder_only_the_name_is_typed(self):
+        """Figure 5 of the report: Desktop > agent was open, so nothing was clicked."""
+        sim, inv, result = self.run_flow(1, dialog_starts='agent')
+        self.assertEqual(sim.errors, [])
+        browsed = self.events(sim, 'save_folder_browsed')[0]
+        self.assertEqual((browsed['clicks'], browsed['reason']), (0, 'already there'))
+        self.assertRegex(sim.field, r'^inventory_[a-z]{3}\d\d\.ods$')
+        self.assertEqual(sim.saved_as.parent, sim.folder)
+        self.assertTrue(result['complete'], result)
+
+    def test_if_desktop_is_not_in_the_dialog_the_full_path_is_typed_so_the_agent_folder_is_reached(self):
+        sim, inv, result = self.run_flow(2, parent_listed=False)
         self.assertTrue(result['complete'])
-        self.assertEqual(sim.saved_as.parent.name, '20261008-142443-09ab12')   # where the dialog was
+        self.assertEqual(sim.saved_as.parent, sim.folder)               # never left in Documents
+        self.assertEqual(sim.field, str(sim.saved_as))
+        self.assertEqual(len(self.events(sim, 'save_folder_typed')), 1)
+        self.assertEqual(result['saved_path'], str(sim.saved_as))
+
+    def test_if_the_address_bar_cannot_be_read_the_file_is_looked_for_where_the_dialog_saved_it(self):
+        sim, inv, result = self.run_flow(2, parent_listed=False, address_bar=False)
+        self.assertTrue(result['complete'])
+        self.assertEqual(sim.saved_as.parent.name, 'Documents')         # where the dialog was
         self.assertEqual(result['saved_path'], str(sim.saved_as))
         self.assertNotIn('\\', sim.field); self.assertNotIn('/', sim.field)
+
+    def test_a_replace_question_elsewhere_is_answered_no_and_the_old_copy_is_left_alone(self):
+        """In the 7:55 PM run Yes replaced a copy left in This PC."""
+        sim, inv, result = self.run_flow(3, parent_listed=False, address_bar=False, stale_copy=True)
+        self.assertEqual(sim.errors, [])
+        self.assertEqual(len(self.events(sim, 'save_replace_declined')), 1)
+        self.assertEqual(self.events(sim, 'save_replace_confirmed'), [])
+        old = sim.folder.parent.parent/'Documents'/inv.path.name
+        self.assertEqual(old.read_text(), 'an older run')                  # untouched
+        self.assertEqual(sim.saved_as, sim.folder/inv.path.name)         # the new one is in the agent folder
+        self.assertTrue(result['complete'], result)
+        self.assertEqual(result['saved_path'], str(sim.saved_as))
 
     # --- what the second recording showed -------------------------------------------------
 
@@ -152,7 +184,7 @@ class SpreadsheetFlowTests(unittest.TestCase):
         sim, inv, result = self.run_flow(1)
         last = self.events(sim, 'workbook_saved')[-1]
         self.assertEqual(last['method'], 'file_menu')
-        self.assertEqual(sim.menu_saves, 1)
+        self.assertEqual(sim.menu_saves, 2)                           # after the totals, and at the end
         self.assertEqual(sim.keys[-2:], ['alt+f', 's'])               # File, Save; then the window closes
         self.assertTrue(sim.closed and not sim.dirty)
 
@@ -208,7 +240,7 @@ class SpreadsheetFlowTests(unittest.TestCase):
         self.assertEqual(plain(sim.table()), expected_table(ENTRY))
         self.assertEqual(self.events(sim, 'column_filled')[0]['confirmed'], False)
         self.assertEqual(self.events(sim, 'cell_repaired'), [])          # no repair loop
-        self.assertEqual([e['step'] for e in self.events(sim, 'step_skipped')], ['temp_row', 'sort'])
+        self.assertEqual([e['step'] for e in self.events(sim, 'step_skipped')], ['sort'])
 
     # --- the time cap -------------------------------------------------------------------
 
@@ -231,11 +263,14 @@ class SpreadsheetFlowTests(unittest.TestCase):
         self.assertIn('error', result)
 
     def test_a_slow_run_drops_the_optional_steps_but_still_finishes_the_table(self):
-        """With less time the temporary row goes first; the totals and the save stay."""
+        """With less time the polish goes first (the sort, then the format); the records,
+        the totals and the save stay."""
         sim, inv, result = self.run_flow(9, seconds=380)
         self.assertEqual(sim.errors, [])
         skipped = [e['step'] for e in self.events(sim, 'step_skipped')]
-        self.assertIn('temp_row', skipped)
+        self.assertIn('sort', skipped)
+        self.assertNotIn('summary', skipped)
+        self.assertEqual(len(self.events(sim, 'summary_added')), 1)
         self.assertTrue(result['complete'], result)
         self.assertLessEqual(sim.clock, 380)
 

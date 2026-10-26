@@ -40,26 +40,6 @@ class InventoryFallbackTests(unittest.TestCase):
         self.inv.window = Mock()
         self.inv.select = Mock()
 
-    def test_temp_row_deleted_with_ctrl_minus_without_touching_menus(self):
-        self.inv.cell_text = Mock(side_effect=['', ''])
-        self.inv.menu = Mock()
-        self.inv.remove_temp_row()
-        keys = [c.args for c in self.gui.hotkey.call_args_list]
-        self.assertIn(('shift', 'space'), keys)
-        self.assertIn(('ctrl', '-'), keys)
-        self.inv.menu.assert_not_called()
-        self.assertTrue(any(c.kwargs.get('method') == 'ctrl_minus_entire_row'
-                            for c in self.gui.event.call_args_list))
-
-    def test_dialog_then_clear_fallbacks_when_row_survives(self):
-        self.inv.cell_text = Mock(return_value='INV-TEMP')
-        self.inv.delete_row_openoffice = Mock(side_effect=RuntimeError('Timed out waiting for Edit'))
-        self.gui.window_handles.return_value = []
-        self.inv.remove_temp_row()
-        self.inv.delete_row_openoffice.assert_called_once()
-        self.gui.press.assert_any_call('backspace')      # OpenOffice clears with Backspace
-        self.assertTrue(any(c.args[0] == 'temp_row_cleared' for c in self.gui.event.call_args_list))
-
     def test_menu_timeout_in_a_step_no_longer_fails_the_run(self):
         ok = self.inv.attempt('optimal_width', Mock(side_effect=RuntimeError("Timed out waiting for ['Format']")))
         self.assertFalse(ok)
@@ -310,19 +290,19 @@ class ReviewWorkTests(unittest.TestCase):
             self.inv.save.assert_not_called()
             self.inv.cell.assert_not_called()
 
-    def test_a_note_is_a_real_edit_and_is_saved_afterwards(self):
-        chooser, _ = self.only('add_note')
-        with chooser:
-            self.inv.review_until(self.phase(3))
-        self.assertEqual(self.inv.save.call_count, 3)
+    def test_the_review_types_nothing_but_what_if_quantities_and_puts_them_back(self):
+        """The temporary notes column (J) was removed: nothing is typed into the sheet that
+        was not asked for, apart from a quantity that is always restored."""
+        self.assertFalse(hasattr(self.inv, 'add_note'))
+        self.assertFalse(hasattr(self.inv, 'NOTE_CHOICES'))
+        self.inv.cell_text = Mock(side_effect=lambda address: str(ENTRY[int(address[1:])-2][3]))
+        import random
+        random.seed(5)
+        self.inv.review_until(self.phase(60))
         cells = [c.args[0] for c in self.inv.cell.call_args_list]
-        self.assertEqual(cells[0], 'J1')                       # header typed once
-        self.assertEqual(cells.count('J1'), 1)
-        self.assertTrue(all(c.startswith('J') for c in cells)) # never touches validated cells
-        self.assertEqual(len(self.inv.notes), 3)
-
-    def test_notes_never_use_the_serial_number_column_or_inv_prefix(self):
-        self.assertFalse(any(n.startswith('INV-') for n in self.inv.NOTE_CHOICES))
+        self.assertTrue(all(c[0] == 'D' for c in cells), cells)         # Quantity cells only
+        self.assertEqual(self.inv.pending, {})                          # every what-if put back
+        self.inv.save.assert_not_called()
 
     def test_what_if_edit_is_undone_and_confirmed(self):
         with patch.object(self.module.random, 'randint', side_effect=[4, 3]), \
@@ -773,17 +753,9 @@ class GridPointerTests(unittest.TestCase):
                          [('ctrl', 'b'), ('ctrl', 'shift', '4'), ('ctrl', 'shift', '4')])
         self.assertEqual([c.args[0] for c in self.inv.select.call_args_list], ['E2:F8', 'F11:F15'])
 
-    def test_temp_row_is_removed_by_clicking_its_row_number(self):
-        self.inv.cell_text = Mock(return_value='')
-        self.inv.remove_temp_row()
-        x, y = self.gui.click_at.call_args.args
-        top, bottom = self.grid.rows[8]
-        self.assertTrue(0 <= x <= 31 and top <= y <= bottom)
-        self.assertEqual([c.args for c in self.gui.hotkey.call_args_list], [('ctrl', '-')])
-
-
 class SaveByClickingTests(unittest.TestCase):
-    """Nobody types C:\\Users\\...\\20261010-005543-857f58\\inventory.ods into Save As."""
+    """Nobody types C:\\Users\\...\\Desktop\\agent\\inventory_oct17.ods into Save As: the
+    folder is reached by clicks, and only the name is typed."""
 
     def setUp(self):
         import tempfile
@@ -791,15 +763,15 @@ class SaveByClickingTests(unittest.TestCase):
         patcher = patch.dict(sys.modules, {'gui_support': self.support, 'pyautogui': self.pg})
         patcher.start(); self.addCleanup(patcher.stop)
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
-        self.folder = Path(temp.name)/'Documents'/'HackathonDemo'
-        (self.folder/'run1').mkdir(parents=True)
-        self.gui = Mock(run_dir=self.folder/'run1'); self.gui.pace = 1.0
-        self.inv = self.module.InventoryAction(self.gui, {}, 5000)
+        self.folder = Path(temp.name)/'Desktop'/'agent'          # the agent folder is on the Desktop
+        self.folder.mkdir(parents=True)
+        self.gui = Mock(run_dir=self.folder); self.gui.pace = 1.0
+        self.inv = self.module.InventoryAction(self.gui, {'save_folder': str(self.folder)}, 5000)
         self.inv.window = Mock()
         self.dialog = Mock()
         self.gui.window.return_value = self.dialog
-        self.items = {('Documents', 'TreeItem'): Mock(name='Documents'),
-                      ('HackathonDemo', 'ListItem'): Mock(name='HackathonDemo'),
+        self.items = {('Desktop', 'TreeItem'): Mock(name='Desktop'),
+                      ('agent', 'ListItem'): Mock(name='agent'),
                       ('File name', 'Edit'): Mock(name='File name')}
         self.gui.find.side_effect = lambda window, names, kind=None: next(
             (self.items[(n, kind)] for n in names if (n, kind) in self.items), None)
@@ -810,13 +782,25 @@ class SaveByClickingTests(unittest.TestCase):
     def typed(self):
         return [c.args[0] for c in self.gui.type_text.call_args_list]
 
+    def address_bar(self, shown):
+        """Give the Mock dialog an address bar naming `shown`."""
+        bar = Mock(); bar.window_text.return_value = f'Address: {shown}'
+        self.dialog.descendants.side_effect = lambda control_type=None: (
+            [bar] if control_type == 'ToolBar' else [])
+
+    def clicks(self):
+        return [(c.args[0], c.kwargs.get('double', False)) for c in self.gui.click.call_args_list]
+
+    def test_the_workbook_goes_into_the_agent_folder_and_is_named_by_the_day(self):
+        self.assertEqual(self.inv.path.parent, self.folder)
+        self.assertRegex(self.inv.path.name, r'^inventory_[a-z]{3}\d\d\.ods$')
+
     def test_folder_is_reached_by_clicks_and_only_the_file_name_is_typed(self):
         self.inv.locate_saved = Mock(return_value=True)
         self.inv.save()
-        clicks = [(c.args[0], c.kwargs.get('double', False)) for c in self.gui.click.call_args_list]
-        self.assertEqual(clicks, [(self.items[('Documents', 'TreeItem')], False),
-                                  (self.items[('HackathonDemo', 'ListItem')], True),
-                                  (self.items[('File name', 'Edit')], False)])
+        self.assertEqual(self.clicks(), [(self.items[('Desktop', 'TreeItem')], False),
+                                         (self.items[('agent', 'ListItem')], True),
+                                         (self.items[('File name', 'Edit')], False)])
         self.assertEqual(len(self.typed()), 1)
         name = self.typed()[0]
         self.assertRegex(name, r'^inventory_[a-z]{3}\d\d(_\d+)?\.ods$')
@@ -824,18 +808,62 @@ class SaveByClickingTests(unittest.TestCase):
         self.gui.click_named.assert_called_once_with(self.dialog, ['Save'], 'Button')
         self.assertTrue(self.inv.saved_once)
 
-    def test_if_documents_is_not_listed_the_name_alone_is_still_typed(self):
-        del self.items[('Documents', 'TreeItem')]
+    def test_if_the_dialog_already_shows_the_agent_folder_nothing_is_clicked_but_the_name_field(self):
+        """Table 4 step 2, Figure 5: the address bar reads Desktop\\agent, so only the name is typed."""
+        self.address_bar(self.folder)
+        self.inv.locate_saved = Mock(return_value=True)
+        self.inv.save()
+        self.assertEqual(self.clicks(), [(self.items[('File name', 'Edit')], False)])
+        self.assertEqual(len(self.typed()), 1)
+        self.assertTrue(any(c.args[0] == 'save_folder_browsed' and c.kwargs['reason'] == 'already there'
+                            for c in self.gui.event.call_args_list))
+
+    def test_if_the_parent_folder_is_not_listed_the_name_alone_is_still_typed(self):
+        del self.items[('Desktop', 'TreeItem')]
         self.inv.locate_saved = Mock(return_value=True)
         self.inv.save()
         self.assertEqual(len(self.typed()), 1)
         self.assertNotIn('\\', self.typed()[0]); self.assertNotIn('/', self.typed()[0])
+
+    def test_a_dialog_showing_another_folder_gets_the_full_path_typed(self):
+        """Save is never pressed while the dialog plainly shows another folder."""
+        self.address_bar(r'C:\Users\User\Documents')
+        self.inv.save()
+        self.assertEqual(self.typed(), [str(self.inv.path)])
+        self.assertEqual(self.inv.path.parent, self.folder)
+        self.assertTrue(any(c.args[0] == 'save_folder_typed' for c in self.gui.event.call_args_list))
+
+    def test_a_replace_question_outside_the_agent_folder_is_answered_no_then_the_path_is_typed(self):
+        """The name was free in the agent folder, so the question means the dialog was
+        elsewhere: answer No (never replace someone else's copy), then type the full path."""
+        asked = iter([[77], []])                       # the question, then nothing more
+        self.gui.window_handles.side_effect = lambda **kw: next(asked, [])
+        self.inv.save()
+        self.assertEqual([c.args[0] for c in self.gui.press.call_args_list], ['n'])
+        self.assertEqual(self.typed(), [self.inv.path.name, str(self.inv.path)])
+        self.assertTrue(any(c.args[0] == 'save_replace_declined' for c in self.gui.event.call_args_list))
+
+    def test_a_replace_question_for_the_typed_path_in_the_agent_folder_is_answered_yes(self):
+        self.address_bar(r'C:\Users\User\Documents')
+        asked = iter([[77]])
+        self.gui.window_handles.side_effect = lambda **kw: next(asked, [])
+        self.inv.save()
+        self.assertEqual([c.args[0] for c in self.gui.press.call_args_list], ['y'])
 
     def test_the_file_is_found_wherever_the_dialog_really_saved_it(self):
         elsewhere = self.folder.parent/self.inv.path.name       # saved one folder up
         elsewhere.write_text('x')
         self.assertTrue(self.inv.locate_saved(timeout=0))
         self.assertEqual(self.inv.path, elsewhere)
+
+    def test_only_a_file_written_by_this_save_is_accepted(self):
+        """In the 7:55 PM run an older copy of the same name was taken for the new one."""
+        import os, time
+        old = self.folder/self.inv.path.name
+        old.write_text('x')
+        os.utime(old, (1000, 1000))
+        self.assertFalse(self.inv.locate_saved(timeout=0, since=time.time()))
+        self.assertTrue(self.inv.locate_saved(timeout=0))
 
     def test_full_path_is_typed_only_as_the_last_resort(self):
         self.inv.locate_saved = Mock(return_value=False)
@@ -854,6 +882,8 @@ class SaveByClickingTests(unittest.TestCase):
         (self.folder/first).write_text('x')
         second = self.inv.pick_name()
         self.assertEqual(second, first.replace('.ods', '_2.ods'))
+        (self.folder.parent/second).write_text('x')              # taken on the Desktop too
+        self.assertEqual(self.inv.pick_name(), first.replace('.ods', '_3.ods'))
 
     def test_later_saves_are_just_ctrl_s(self):
         self.inv.saved_once = True
@@ -1011,7 +1041,7 @@ class TimeCapTests(unittest.TestCase):
         self.inv.ranges_work = ranges_work
         for name in ('calibrate_grid', 'select', 'save', 'row', 'think', 'fill_sku',
                      'reuse_row_with_retry', 'fill_formulas', 'cell', 'verify_table',
-                     'remove_temp_row', 'format_table', 'sort_by_item', 'summary'):
+                     'format_table', 'sort_by_item', 'summary'):
             setattr(self.inv, name, Mock(side_effect=lambda *a, _n=name, **k: ran.append(_n)))
         self.inv.config['calc_shortcut'] = 'OpenOffice Calc'
         self.inv.grid = sheet_grid()                       # the mouse route: costs are not scaled up
@@ -1024,27 +1054,19 @@ class TimeCapTests(unittest.TestCase):
 
     def test_everything_the_file_needs_is_done_and_saved_before_any_polish(self):
         ran = self.steps(remaining=400)
-        for step in ('fill_sku', 'fill_formulas', 'verify_table', 'remove_temp_row',
+        for step in ('fill_sku', 'fill_formulas', 'verify_table',
                      'format_table', 'sort_by_item', 'summary'):
             self.assertIn(step, ran)
         summary = ran.index('summary')
         self.assertEqual(ran[summary+1], 'save')                    # complete workbook on disk
-        self.assertLess(ran.index('remove_temp_row'), summary)      # a later row delete would shift the totals
         self.assertGreater(ran.index('format_table'), summary)
         self.assertGreater(ran.index('sort_by_item'), summary)
-        self.assertEqual(ran[-1], 'save')
+        self.assertEqual(ran[-1], 'sort_by_item')                   # the polish is saved by wrap_up
         self.assertEqual(self.skipped(), [])
-
-    def test_short_of_time_the_temporary_row_goes_first(self):
-        ran = self.steps(remaining=150)
-        self.assertNotIn('remove_temp_row', ran)
-        self.assertEqual(self.skipped(), ['temp_row'])
-        for step in ('summary', 'format_table', 'sort_by_item'):
-            self.assertIn(step, ran)
 
     def test_with_no_time_for_polish_the_totals_and_the_save_still_happen(self):
         ran = self.steps(remaining=25)
-        self.assertEqual(self.skipped(), ['temp_row', 'format', 'sort'])
+        self.assertEqual(self.skipped(), ['format', 'sort'])
         self.assertEqual(ran[-2:], ['summary', 'save'])
 
     def test_a_slower_run_and_the_keyboard_route_leave_more_room(self):
@@ -1058,11 +1080,11 @@ class TimeCapTests(unittest.TestCase):
 
     def test_without_range_selection_nothing_is_filled_checked_or_sorted(self):
         ran = self.steps(remaining=400, ranges_work=False)
-        for step in ('fill_formulas', 'verify_table', 'sort_by_item', 'remove_temp_row'):
+        for step in ('fill_formulas', 'verify_table', 'sort_by_item'):
             self.assertNotIn(step, ran)
         self.assertEqual(ran.count('reuse_row_with_retry'), 6)      # every record still entered
         self.assertIn('summary', ran)
-        self.assertEqual(self.skipped(), ['temp_row', 'sort'])
+        self.assertEqual(self.skipped(), ['sort'])
 
     def test_the_serial_number_paste_covers_the_row_added_later(self):
         self.steps(remaining=400)

@@ -761,16 +761,47 @@ class BrowserContractTests(unittest.TestCase):
         self.assertEqual(status, {'https://a.example': None, 'https://b.example': 'time ran out'})
         self.assertTrue(any(c.args[0] == 'browser_time_up' for c in self.gui.event.call_args_list))
 
-    def test_lingering_on_a_blocked_page_only_waits(self):
+    def test_with_nothing_readable_browsing_ends_early_and_gives_the_time_to_calc(self):
+        """A blocked last page is never scrolled or retried: lingering returns True at once
+        (the old code kept waiting out the phase) and the unused time is carried to Calc."""
         phase = Phase(20, clock=lambda: self.clock[0])
         self.browser.content_verified = False            # the last address did not load
         self.browser.retained_tab = None
         self.browser.inspect_homepage = Mock(); self.browser.continue_organiser_notice = Mock()
         self.browser.brief_read = Mock(side_effect=lambda *a, **k: self.advance(4))
-        self.browser.linger(phase)
+        self.assertTrue(self.browser.linger(phase))
         self.browser.inspect_homepage.assert_not_called()
+        self.browser.brief_read.assert_not_called()
         self.browser.continue_organiser_notice.assert_not_called()
+        self.assertEqual(self.clock[0], 0)
+        self.assertTrue(any(c.args[0] == 'browser_ended_early' for c in self.gui.event.call_args_list))
+
+    def test_a_readable_page_is_read_until_the_phase_ends(self):
+        phase = Phase(20, clock=lambda: self.clock[0])
+        self.browser.content_verified = True; self.browser.tab_dead = False
+        self.browser.retained_tab = None
+        self.browser.inspect_homepage = Mock()
+        self.browser.brief_read = Mock(side_effect=lambda *a, **k: self.advance(4))
+        self.assertFalse(self.browser.linger(phase))
         self.assertGreaterEqual(self.clock[0], 20)
+        self.browser.inspect_homepage.assert_called()
+
+    def test_a_dead_page_with_a_retained_tab_goes_back_to_it_while_returns_remain(self):
+        phase = Phase(20, clock=lambda: self.clock[0])
+        self.browser.content_verified = False; self.browser.tab_dead = True
+        self.browser.retained_tab = 'first'; self.browser.active_tab = 'second'
+        self.browser.retained_url = 'https://a.example'; self.browser.revisits = 0
+        self.browser.activate_tab = Mock(); self.browser.invalidate_page = Mock()
+        self.browser.inspect_homepage = Mock()
+        self.browser.brief_read = Mock(side_effect=lambda *a, **k: self.advance(10))
+        self.assertFalse(self.browser.linger(phase))
+        self.browser.activate_tab.assert_called_once_with('first')
+        self.assertEqual(self.browser.revisits, 1)
+        self.browser.activate_tab.reset_mock()
+        self.browser.active_tab = 'second'; self.browser.revisits = 2    # browser_max_revisits
+        self.clock[0] = 0
+        self.assertTrue(self.browser.linger(Phase(20, clock=lambda: self.clock[0])))
+        self.browser.activate_tab.assert_not_called()
 
     def test_no_new_address_is_typed_in_the_last_thirty_seconds(self):
         self.gui.launch_shortcut.return_value = self.browser.window

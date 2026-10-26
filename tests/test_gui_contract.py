@@ -1,11 +1,9 @@
 """Test cancellation/focus logic with mock Windows APIs; never sends real input."""
 import importlib.util
 import random
-import csv
 from pathlib import Path
 import sys
 import types
-import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -87,12 +85,13 @@ class GUIContractTests(unittest.TestCase):
         self.modules['pyautogui'].write.assert_not_called()
 
     def test_cleanup_releases_modifiers_without_pyautogui(self):
-        self.gui.stop_event = Mock(); self.gui.sampler = Mock(); self.gui.events = Mock()
+        """finish() has no sampler thread or log to close any more: it only lets go of the
+        modifier keys, through win32api so a corner fail-safe cannot stop it."""
         self.gui.finish()
         api = self.modules['win32api'].keybd_event
         self.assertEqual([call.args[0] for call in api.call_args_list], [17, 18, 16, 91])
-        self.gui.stop_event.set.assert_called_once()
-        self.gui.events.close.assert_called_once()
+        self.assertTrue(all(call.args[2] == 2 for call in api.call_args_list))   # key-up events
+        self.modules['pyautogui'].keyUp.assert_not_called()
 
     def test_shifted_characters_release_shift(self):
         self.gui.focus = Mock(); self.gui.sleep = Mock()
@@ -177,9 +176,8 @@ class GUIContractTests(unittest.TestCase):
         r.seed(3)
         pairs = set()
         for _ in range(5):
-            with patch.object(self.module, 'Desktop'), patch.object(self.module.threading, 'Thread'), \
-                 patch.object(self.module.GUI, 'sample_resources'):
-                g = self.module.GUI(Mock(__truediv__=lambda s, o: Mock(open=Mock(return_value=Mock()))))
+            with patch.object(self.module, 'Desktop'):
+                g = self.module.GUI()
             pairs.add((round(g.wheel_speed, 3), round(g.typo_scale, 3)))
             self.assertTrue(0.8 <= g.wheel_speed <= 1.3 and 0.6 <= g.typo_scale <= 1.5)
         self.assertGreater(len(pairs), 1)
@@ -462,26 +460,6 @@ class GUIContractTests(unittest.TestCase):
         self.gui.desktop.windows.assert_not_called()
         self.assertIs(window, self.gui.desktop.window.return_value.wrapper_object.return_value)
 
-    def test_resource_sampler_keeps_five_second_interval_and_cpu_units(self):
-        self.gui.stop_event = Mock(); self.gui.stop_event.wait.side_effect = [False, True]
-        self.gui.start = 0
-        api = self.modules['win32process']
-        self.modules['win32api'].GetCurrentProcess = Mock(return_value=123)
-        api.GetProcessTimes = Mock(side_effect=[{'KernelTime': 0, 'UserTime': 10_000_000},
-                                                {'KernelTime': 0, 'UserTime': 20_000_000}])
-        api.GetProcessMemoryInfo = Mock(return_value={'WorkingSetSize': 50*1024**2})
-        with tempfile.TemporaryDirectory() as directory:
-            self.gui.run_dir = Path(directory)
-            with patch.object(self.module.time, 'monotonic', side_effect=[0, 5]), \
-                 patch.object(self.module.os, 'cpu_count', return_value=4):
-                self.gui.sample_resources()
-            with (self.gui.run_dir/'resources.csv').open() as f:
-                rows = list(csv.DictReader(f))
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(float(rows[0]['agent_cpu_percent_total']), 5)
-        self.assertEqual(float(rows[0]['working_set_mb']), 50)
-        self.assertTrue(all(c.args == (5,) for c in self.gui.stop_event.wait.call_args_list))
-
 
 class KeysTimeLimitAndScreenTests(unittest.TestCase):
     def setUp(self):
@@ -644,6 +622,7 @@ class KeysTimeLimitAndScreenTests(unittest.TestCase):
 
     def test_cell_click_moves_there_then_presses_and_releases(self):
         self.gui.focus = Mock(); self.gui.move = Mock(); self.gui.sleep = Mock()
+        self.pg.position.return_value = (240, 239)                      # the pointer arrived
         self.gui.click_at(240, 239, self.window(), quick=True)
         self.gui.move.assert_called_once_with(240, 239, width=20)
         self.pg.mouseDown.assert_called_once(); self.pg.mouseUp.assert_called_once()
@@ -664,6 +643,7 @@ class KeysTimeLimitAndScreenTests(unittest.TestCase):
     def test_drag_presses_at_the_start_and_releases_at_the_end(self):
         order = []
         self.gui.focus = Mock(); self.gui.sleep = Mock()
+        self.pg.position.return_value = (60, 200)
         self.gui.move = Mock(side_effect=lambda x, y, width=20: order.append(('move', x, y)))
         self.pg.mouseDown.side_effect = lambda: order.append('down')
         self.pg.mouseUp.side_effect = lambda: order.append('up')
@@ -672,10 +652,34 @@ class KeysTimeLimitAndScreenTests(unittest.TestCase):
 
     def test_button_is_released_even_if_the_drag_is_interrupted(self):
         self.gui.focus = Mock(); self.gui.sleep = Mock()
+        self.pg.position.return_value = (60, 200)
         self.gui.move = Mock(side_effect=[None, self.module.TimeUp('Time limit reached')])
         with self.assertRaises(self.module.TimeUp):
             self.gui.drag(60, 200, 60, 290, self.window())
         self.pg.mouseDown.assert_called_once(); self.pg.mouseUp.assert_called_once()
+
+    def test_a_pointer_nudged_by_the_host_is_brought_back_once_before_the_press(self):
+        """The host's mouse over the VM console moved the pointer between the move and the
+        press, and a drag selected the wrong range: the position is checked first."""
+        self.gui.focus = Mock(); self.gui.sleep = Mock()
+        self.gui.move = Mock()
+        self.pg.position.side_effect = [(300, 300), (240, 239)]
+        self.gui.click_at(240, 239, self.window())
+        self.assertEqual(self.gui.move.call_count, 2)                   # the first move and the repair
+        self.assertEqual(self.gui.event.call_args_list[0].args[0], 'pointer_moved')
+        self.pg.mouseDown.assert_called_once(); self.pg.mouseUp.assert_called_once()
+
+    def test_a_pointer_that_keeps_moving_stops_the_click_and_presses_nothing(self):
+        self.gui.focus = Mock(); self.gui.sleep = Mock()
+        self.gui.move = Mock()
+        self.pg.position.side_effect = None
+        self.pg.position.return_value = (300, 300)
+        with self.assertRaises(RuntimeError):
+            self.gui.click_at(240, 239, self.window())
+        self.pg.mouseDown.assert_not_called()
+        with self.assertRaises(RuntimeError):
+            self.gui.drag(60, 200, 60, 290, self.window())
+        self.pg.mouseDown.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -1,5 +1,6 @@
 import sys
 import random
+import time
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,7 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from domain import (Phase, FINAL, HEADERS, NS, safe_same_page_link, validate_inventory,
                     typing_pause, movement_profile, inventory_range,
                     pointer_path, fitts_duration, min_jerk, adjacent_keys, heavy_pause,
-                    summarize_resources, find_grid, address_of, is_highlight, is_separator)
+                    find_grid, address_of, is_highlight, is_separator,
+                    run_notes, key_seconds, typing_seconds, choose_note_indexes, choose_notes,
+                    NOTE_LINE_SECONDS)
 from fake_sheet import FakeSheet, BLUE
 
 
@@ -348,25 +351,134 @@ class HeavyPauseTests(unittest.TestCase):
         self.assertGreater(st.pstdev(draws)/st.mean(draws), 0.2)
 
 
-class ResourceSummaryTests(unittest.TestCase):
-    def test_mean_and_peak_are_reported(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder)/'resources.csv'
-            path.write_text('elapsed_seconds,agent_cpu_percent_total,working_set_mb\n'
-                            '5,1.0,60\n10,3.0,64\n15,8.0,70\n')
-            summary = summarize_resources(path)
-        self.assertEqual((summary['cpu_percent_mean'], summary['cpu_percent_peak']), (4.0, 8.0))
-        self.assertEqual((summary['memory_mb_mean'], summary['memory_mb_peak']), (64.7, 70.0))
-        self.assertEqual(summary['samples'], 3)
+class RunNotesTests(unittest.TestCase):
+    """The notes typed into Notepad are built from the in-memory account of the run."""
+    WHEN = time.strptime('17 Oct 2026 21:46', '%d %b %Y %H:%M')
 
-    def test_missing_or_empty_file_gives_no_summary_instead_of_failing(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as folder:
-            self.assertIsNone(summarize_resources(Path(folder)/'none.csv'))
-            empty = Path(folder)/'resources.csv'
-            empty.write_text('elapsed_seconds,agent_cpu_percent_total,working_set_mb\n')
-            self.assertIsNone(summarize_resources(empty))
+    def report(self, sites=None, inventory=None):
+        phases = {}
+        if sites is not None:
+            phases['browser'] = {'verified': True, 'sites': sites}
+        if inventory is not None:
+            phases['inventory'] = inventory
+        return {'phases': phases}
+
+    SITES = [{'url': 'https://apnews.com', 'loaded': True},
+             {'url': 'https://www.arxiv.org', 'loaded': True},
+             {'url': 'https://www.cnn.com', 'loaded': True, 'consent': True,
+              'search': {'term': 'Asia'}},
+             {'url': 'https://www.asana.com', 'loaded': False, 'reason': 'no proceed link'},
+             {'url': 'https://aws.amazon.com', 'loaded': True, 'popup': True}]
+    INVENTORY = {'complete': True, 'records': 7, 'total_sgd': 3486, 'within_budget': True,
+                 'sorted_in_sheet': True,
+                 'saved_path': r'C:\Users\User\Desktop\agent\inventory_oct17.ods'}
+
+    def texts(self, report):
+        return [text for _, text in run_notes(report, self.WHEN)]
+
+    def test_the_first_line_names_the_date_and_time_without_leading_zeros(self):
+        self.assertEqual(self.texts(self.report())[0], 'Demo run 17 Oct 2026, 9:46 PM')
+        early = time.strptime('05 Jan 2026 07:05', '%d %b %Y %H:%M')
+        self.assertEqual(run_notes(self.report(), early)[0][1], 'Demo run 5 Jan 2026, 7:05 AM')
+
+    def test_sites_visited_are_listed_without_www_and_in_the_order_visited(self):
+        lines = self.texts(self.report(self.SITES))
+        self.assertIn('Visited apnews.com, arxiv.org, cnn.com and aws.amazon.com', lines)
+
+    def test_a_single_site_is_named_without_and(self):
+        lines = self.texts(self.report([{'url': 'https://www.bbc.com', 'loaded': True}]))
+        self.assertIn('Visited bbc.com', lines)
+
+    def test_a_run_where_no_site_opened_says_so(self):
+        lines = self.texts(self.report([{'url': 'https://www.asana.com', 'loaded': False}]))
+        self.assertIn('No website could be opened', lines)
+
+    def test_the_search_names_the_word_and_the_site(self):
+        self.assertIn('Searched for "Asia" on cnn.com', self.texts(self.report(self.SITES)))
+
+    def test_only_the_first_three_searches_are_listed(self):
+        sites = [{'url': f'https://www.site{i}.com', 'loaded': True, 'search': {'term': f'w{i}'}}
+                 for i in range(5)]
+        line = next(t for t in self.texts(self.report(sites)) if t.startswith('Searched'))
+        self.assertIn('w0', line); self.assertIn('w2', line); self.assertNotIn('w3', line)
+
+    def test_sites_that_would_not_open_are_listed_as_skipped(self):
+        self.assertIn('Skipped asana.com (would not open)', self.texts(self.report(self.SITES)))
+
+    def test_a_site_left_unvisited_because_time_ran_out_is_not_called_skipped(self):
+        sites = [{'url': 'https://www.bbc.com', 'loaded': True},
+                 {'url': 'https://www.cnn.com', 'loaded': False, 'reason': 'time ran out'}]
+        self.assertFalse(any(t.startswith('Skipped') for t in self.texts(self.report(sites))))
+
+    def test_pop_ups_accepted_and_closed_are_noted_separately(self):
+        lines = self.texts(self.report(self.SITES))
+        self.assertIn('Accepted the pop-up on cnn.com', lines)
+        self.assertIn('Closed the pop-up on aws.amazon.com', lines)
+
+    def test_the_workbook_line_gives_name_items_total_and_budget_result(self):
+        lines = self.texts(self.report(inventory=self.INVENTORY))
+        self.assertIn('inventory_oct17.ods: 7 items, total 3,486, within budget', lines)
+        self.assertIn('Sorted by item, saved in the agent folder', lines)
+
+    def test_over_budget_and_not_sorted_are_reported_as_they_are(self):
+        lines = self.texts(self.report(inventory={**self.INVENTORY, 'within_budget': False,
+                                                  'sorted_in_sheet': False}))
+        self.assertIn('inventory_oct17.ods: 7 items, total 3,486, over budget', lines)
+        self.assertIn('Saved in the agent folder', lines)
+
+    def test_an_unfinished_workbook_is_never_called_complete(self):
+        lines = self.texts(self.report(inventory={**self.INVENTORY, 'complete': False}))
+        self.assertIn('inventory_oct17.ods saved, not finished', lines)
+        self.assertFalse(any('items, total' in t for t in lines))
+
+    def test_without_a_saved_workbook_there_is_no_workbook_line(self):
+        lines = self.texts(self.report(inventory={'complete': True, 'saved_path': None}))
+        self.assertEqual(len(lines), 1)
+
+    def test_run_notes_do_not_contain_the_end_line_which_the_notes_agent_adds(self):
+        self.assertNotIn('END', self.texts(self.report(self.SITES, self.INVENTORY)))
+
+    def test_priorities_keep_the_run_the_sites_and_the_workbook_longest(self):
+        priority = {text: p for p, text in run_notes(self.report(self.SITES, self.INVENTORY), self.WHEN)}
+        most = [p for t, p in priority.items() if t.startswith(('Demo run', 'Visited', 'inventory_oct17.ods:'))]
+        rest = [p for t, p in priority.items() if t.startswith(('Skipped', 'Closed', 'Searched', 'Sorted'))]
+        self.assertLess(max(most), min(rest))
+
+    def test_the_lines_come_in_the_order_the_run_did_things(self):
+        lines = self.texts(self.report(self.SITES, self.INVENTORY))
+        self.assertEqual(lines[0], 'Demo run 17 Oct 2026, 9:46 PM')
+        self.assertTrue(lines[1].startswith('Visited'))
+        self.assertTrue(lines[-2].startswith('inventory_oct17.ods:'))
+        self.assertTrue(lines[-1].startswith('Sorted by item'))
+
+
+class NoteChoiceTests(unittest.TestCase):
+    LINES = [(1, 'Demo run 17 Oct 2026, 9:46 PM'), (2, 'Visited apnews.com and arxiv.org'),
+             (5, 'Searched for "Asia" on cnn.com'), (6, 'Skipped asana.com (would not open)'),
+             (3, 'inventory_oct17.ods: 7 items, total 3,486, within budget')]
+
+    def test_typing_takes_longer_for_symbols_capitals_and_a_slower_pace(self):
+        self.assertGreater(key_seconds(':'), key_seconds('a'))
+        self.assertGreater(key_seconds('A'), key_seconds('a'))
+        self.assertGreater(typing_seconds('hello world', 1.2), typing_seconds('hello world', 1.0))
+        self.assertAlmostEqual(typing_seconds('ab'), key_seconds('a')+key_seconds('b'))
+
+    def test_with_plenty_of_time_every_line_is_kept_in_its_own_order(self):
+        self.assertEqual(choose_note_indexes(self.LINES, 1000), [0, 1, 2, 3, 4])
+        self.assertEqual(choose_notes(self.LINES, 1000), [t for _, t in self.LINES])
+
+    def test_with_little_time_the_least_important_lines_go_first(self):
+        needed = sum(typing_seconds(t)+NOTE_LINE_SECONDS for p, t in self.LINES if p <= 3)
+        kept = choose_notes(self.LINES, needed+1)
+        self.assertEqual([t for p, t in self.LINES if p <= 3], kept)
+
+    def test_a_slower_typist_gets_fewer_lines_in_the_same_time(self):
+        fast = choose_note_indexes(self.LINES, 40, pace=0.8)
+        slow = choose_note_indexes(self.LINES, 40, pace=1.5)
+        self.assertGreaterEqual(len(fast), len(slow))
+
+    def test_no_time_keeps_nothing(self):
+        self.assertEqual(choose_note_indexes(self.LINES, 0), [])
 
 
 if __name__ == '__main__':
