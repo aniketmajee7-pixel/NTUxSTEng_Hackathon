@@ -12,7 +12,7 @@ This repo is a hackathon entry (NUS x ST Engineering 2026, "Synthetic Human Agen
 
 Finals (6 teams): 10 min presentation, 3 min demo, 2 min Q&A, marked on Problem Understanding (3), Innovation & Creativity (3), Presentation & Q&A (4).
 
-The top-level `*.py`, `config.json`, `requirements.txt` and `create_shortcut.ps1` are the code **submitted on 17 Oct 2026**; `README.md` is the team's running log of VM rounds (its last section is current). The implementation report, research notes and finals slides are kept off GitHub.
+The top-level `*.py`, `config.json`, `requirements.txt` and `create_shortcut.ps1` are the code **submitted on 17 Oct 2026**; `README.md` is the public overview; `DEVLOG.md` is the team's running log of VM rounds (its last section is current). The implementation report, research notes and finals slides are kept off GitHub.
 
 ## Running
 
