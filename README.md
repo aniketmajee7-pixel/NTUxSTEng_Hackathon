@@ -7,7 +7,7 @@ human on screen and in the system telemetry a security analyst reads (Sysmon, Pr
 Explorer, Event Viewer).
 
 Team 21's entry to the **NTU × ST Engineering 2026 hackathon**, "Synthetic Human Agent"
-challenge, where it was selected as one of six finalists.
+challenge, where it **won champion** 🏆 out of six finalist teams.
 
 ## Demo
 
