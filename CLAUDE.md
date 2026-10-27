@@ -48,4 +48,4 @@ The tests fake pyautogui/pywinauto/win32 (`tests/fake_sheet.py`, `tests/sim_calc
 
 - The GitHub repo (`aniketmajee7-pixel/NTUxSTEng_Hackathon`, renamed from `NUSxSTEng_Hackathon`; the old URL redirects) is public on purpose (since late Oct 2026), so anything pushed is visible to everyone.
 - Keep the top-level `*.py` identical to the submission unless a change is deliberate; `tools/make_zip.py` regenerates `BUILD.json` for any new build.
-- GitHub holds code only: no report, slides, videos or research docs (the report PDF was purged from history on 26 Oct 2026).
+- GitHub holds code only: no report, slides, videos or research docs (the report PDF was purged from history on 26 Oct 2026). The README's demo video is a GitHub user-attachments upload, not a repo file.

@@ -11,9 +11,10 @@ challenge, where it was selected as one of six finalists.
 
 ## Demo
 
-<!-- Demo video: replace this comment with the video link or an embedded player. -->
-> **Demo video:** a complete run in the agent's three-minute demo mode, recorded in real
-> time and uncut. Link to be added.
+https://github.com/user-attachments/assets/91e0d37a-fee1-4572-a82f-7644d8d3cf14
+
+A complete run in the agent's three-minute demo mode (3 min 21 s), recorded in real time
+and uncut.
 
 ## The challenge
 
