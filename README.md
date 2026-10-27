@@ -1,97 +1,122 @@
 # Synthetic Human Agent
 
-A Python agent that sits at a Windows 11 desktop and does fifteen minutes of ordinary
-office work the way a person would: it browses news sites in Chrome, builds a stock
-inventory in OpenOffice Calc, and types up what it did in Notepad. It is built to look
-human on screen and in the system telemetry a security analyst reads (Sysmon, Process
-Explorer, Event Viewer).
+**🏆 Champion of the NTU × ST Engineering Hackathon 2026**, "Synthetic Human Agent"
+challenge, by Team 21.
 
-Team 21's entry to the **NTU × ST Engineering 2026 hackathon**, "Synthetic Human Agent"
-challenge, where it **won champion** 🏆 out of six finalist teams.
+A Python program that sits at a Windows 11 computer and does fifteen minutes of ordinary
+office work the way a person would. It reads news sites in Chrome, builds a stock-inventory
+spreadsheet in OpenOffice Calc, and types a short account of the session in Notepad.
+Nobody touches the keyboard.
+
+The hard part is that it was judged from the system logs, not just the screen. A security
+reviewer reading Sysmon, Process Explorer and Event Viewer should see a person at work:
+apps started from their icons, human timing, and no trace of a script.
+
+In short: **it starts like a person, moves like a person, and works like a person.**
 
 ## Demo
 
 https://github.com/user-attachments/assets/91e0d37a-fee1-4572-a82f-7644d8d3cf14
 
-A complete run in the agent's three-minute demo mode (3 min 21 s), recorded in real time
-and uncut.
+The three-minute version shown at the finals, recorded in real time and uncut on the
+organisers' VM. It does the same three jobs as the full run, with three spreadsheet records
+instead of seven.
 
-## The challenge
+## The task
 
-On an air-gapped Windows 11 VM supplied by the organisers, the agent must, with no one
-touching the keyboard and inside 15 minutes:
+On an air-gapped Windows 11 VM supplied by the organisers, inside 15 minutes and unattended:
 
-1. **Browse:** read news and tech homepages in Chrome (mock sites, many behind certificate warnings).
-2. **Build:** make, format and save a stock-inventory spreadsheet in OpenOffice Calc.
-3. **Write:** type a short account of the session in Notepad, ending with `END`.
+| | Job | What the agent does |
+|---|---|---|
+| 1 | **Browse** in Chrome | Opens news and tech homepages, gets past certificate warnings and pop-ups, reads, searches within a page |
+| 2 | **Build** in OpenOffice Calc | Enters inventory records, formulas and totals, formats and sorts the sheet, saves it with Save As |
+| 3 | **Write** in Notepad | Types an account of the session, ending with the line `END` |
 
-Entries were judged on telemetry, not just on what appears on screen: **process
-authenticity** (30%), **human entropy and timing** (30%), **complexity of action** (20%)
-and **resource efficiency** (20%).
+Entries were scored on **process authenticity** (30%), **human entropy and timing** (30%),
+**complexity of action** (20%) and **resource efficiency** (20%). That is four questions a
+reviewer asks: who started each program, is the timing human, is it doing real work across
+apps, and is it light on the machine?
+
+### What stood in the way
+
+- **Calc is invisible to automation.** OpenOffice Calc 4.1 tells Windows nothing about its
+  cells, menus or Name Box, so the sheet has to be read from the screen.
+- **The VM's input has quirks.** Shift+arrow lost the Shift, Ctrl+D opens a list instead of
+  filling down, and a mouse resting on the host machine moved the VM's pointer.
+- **The web fights back.** Certificate warnings (some with no way through), cookie banners,
+  offer pop-ups, and pages that load blank.
+- **A hard 15-minute limit** that has to hold even when the VM runs slow.
+
+## Naive script vs this agent
+
+| What a reviewer checks | A naive script | This agent |
+|---|---|---|
+| Who started the apps? | `python.exe` launches `chrome.exe` | `explorer.exe`: every app is double-clicked from its desktop icon |
+| Typing rhythm | `sleep()` with identical gaps | Gaps vary with a spread (CV) of 0.59; real copy-typists sit near 0.47 |
+| Pointer | Straight line at constant speed | Fast out, slow in, and sometimes misses and corrects |
+| Files on disk | Logs and screenshots | None. No logs, no cache, not even `__pycache__`; only Calc saves the workbook |
+
+## How it works
+
+### Starts like a person
+
+The agent itself is started from a desktop shortcut (`pythonw.exe`, so no console window),
+and it opens Chrome, Calc and Notepad by double-clicking their icons. Explorer is the parent
+of every app, which is what Sysmon shows for a real user. It never calls `subprocess`,
+`os.startfile` or COM, and it writes no files of its own during a run. Before any input it
+checks every file against a SHA-256 manifest, so a bad copy stops before Chrome opens.
+
+### Moves like a person
+
+Each pointer move follows a minimum-jerk speed curve (Flash & Hogan, 1985): it peaks early,
+then eases onto the target. How long a reach takes follows Fitts' law, so further or smaller
+targets take longer, with random variation on every move. About 40% of long moves land
+slightly off and correct, and the path has a small bow, tremor and uneven sampling.
+
+### Pauses like a person
+
+Every pause (hovering before a click, reading a page) is drawn from a lognormal
+distribution: most are short and a few run long, as people's do. A flat random range is not
+enough; chat bots with uniformly random delays were still caught by entropy tests
+(Gianvecchio et al., 2008). Each run is a new person: pace, scroll speed, typo rate and pause
+length are drawn fresh at the start.
+
+### Types like a person
+
+Key gaps depend on what comes next: 0.12–0.30 s between letters, longer after a space, longer
+still before a symbol. Each word gets its own pace, and capitals use a real held Shift. Slips
+land only on neighbouring QWERTY keys and are noticed and fixed about half a second later,
+never inside a formula or a file path. The resulting variability was checked against Aalto's
+136-million-keystroke study (Dhakal et al., 2018).
+
+### Works like a person
+
+- **Reads Calc from pixels.** From one screen capture it finds the blue highlighted row and
+  column headers and the 1-px grid lines, then rebuilds an even grid so one hidden line can't
+  misnumber every cell after it. It clicks cells, drags or Shift-clicks ranges, and rechecks
+  the headers before typing, with a keyboard fallback if the grid is lost.
+- **Checks its own work.** After saving, it opens the `.ods` file and verifies the records,
+  the total and the budget result.
+- **Handles a messy web.** On a certificate warning it checks the site name, then Advanced,
+  then Proceed; if there is no Proceed it skips the site. It accepts cookie consent, closes
+  offers with their X, types addresses, opens tabs, searches within pages, and never counts
+  a page it couldn't read as read.
+- **Keeps to time.** Each app has a hard deadline. Calc does the essentials first and
+  polishes only if time allows, and the notes are chosen line by line to fit the typing
+  speed measured during the run, so `END` always lands inside 15 minutes.
 
 ## Results from the final VM run
 
 | | |
 |---|---|
 | Every task finished | **14 min 15 s** of the 15 minutes |
-| Homepages read | **4**, plus one skipped because its warning had no Proceed link |
+| Homepages read | **4**, plus asana.com skipped because its warning had no Proceed link |
 | Workbook | **7 records, SGD 3,486 total**, within budget, saved and checked from the file |
-| Agent CPU | **0.11%** on average, peak 0.86%, about 60 MB of memory (measured on an earlier VM run) |
-| Files the agent writes | **0**; only Calc writes, when it saves the workbook |
+| Agent CPU and memory | **0.11%** average CPU (peak 0.86%), about **60 MB** (measured on an earlier VM run) |
+| Files written by the agent | **0**; only Calc writes, when it saves the workbook |
 
 Timeline: Chrome opens at 0:08 → searches CNN at 2:49 → Calc at 4:41 → 7 records in by
 8:59 → formatted and sorted by 11:12 → Notepad at 12:17 → `END` at 14:15.
-
-## How it passes for a person
-
-### In the process tree
-
-| What a reviewer checks | A naive script | This agent |
-|---|---|---|
-| Who started the apps? | `python.exe` launches `chrome.exe` | `explorer.exe`: every app is opened by double-clicking its desktop icon |
-| Typing rhythm | `sleep()` with identical gaps | Gaps vary (CV 0.59; real typists ≈ 0.47) |
-| Pointer | Straight line, constant speed | Fitts-timed reach that eases in and sometimes corrects |
-| Files on disk | Logs and screenshots | None. No logs, no cache, not even `__pycache__` |
-
-The agent itself is started from a desktop shortcut (`pythonw.exe`, so no console
-window). It never calls `subprocess`, `os.startfile` or COM to launch anything.
-
-### In its timing
-
-- **Pointer.** Each reach follows a minimum-jerk velocity profile (Flash & Hogan, 1985):
-  fast out, long slow approach. Its duration follows Fitts' law, tuned against a manual
-  screen recording on the VM, with lognormal noise per move. About 40% of long
-  moves land slightly off target and correct, and samples have small tremor and
-  irregular spacing.
-- **Pauses.** Every pause between actions (hovering before a click, reading a page,
-  glancing at the source list) is drawn from a lognormal distribution, so most are
-  short and a few run long. Studies of how long people stay on web pages show the
-  same long tail (Liu et al., 2010, fit it with a Weibull). A flat random range would
-  not do: chat bots with uniformly random delays were still detected by entropy tests
-  on their message timing (Gianvecchio et al., 2008).
-- **Typing.** Gaps depend on the next key: 0.12–0.30 s between letters, 0.25–0.65 s
-  after a space, 0.35–0.95 s before a symbol. Each word gets its own pace, capitals use
-  a real held Shift, and slips land only on neighbouring QWERTY keys before being
-  noticed and corrected. We checked the resulting variability against Aalto's 136
-  million-keystroke study (Dhakal et al., 2018).
-- **A new person every run.** Pace, scroll speed, typo rate, pause length and the order
-  of the 27 homepages are drawn fresh at the start of each run.
-
-### In the work itself
-
-- **Reading Calc from pixels.** OpenOffice Calc 4.1 exposes no cells, menus or Name Box
-  to Windows UI Automation. From a single GDI BitBlt of the screen, the agent finds the
-  blue highlighted headers and the 1-px grid lines, and rebuilds an even grid. It then
-  clicks cells, drags ranges or Shift-clicks them, and rechecks the headers before
-  typing.
-- **Checking its own output.** After saving, it opens the `.ods` file as a ZIP and
-  verifies the records, the total and the budget result.
-- **Handling a messy web.** It checks the hostname on a certificate warning before
-  choosing Advanced → Proceed, skips the site if there is no Proceed, accepts cookie
-  consent, closes offers with their X, and never counts an unreadable page as read.
-- **Keeping to time.** Each phase has a hard deadline. Calc does the essentials first
-  and polishes only if time allows. The notes are chosen line by line to fit the typing
-  speed measured during the run, with time reserved for the closing `END`.
 
 ## Architecture
 
@@ -105,33 +130,46 @@ flowchart TD
     I --> G
     N --> G
     S --> G
-    G["gui_support.py<br/>the hands: every key, click and screen grab"] --> D
+    G["gui_support.py<br/>the hands: every key, click and screen read"] --> D
     M --> D
     B --> D
     I --> D
-    D["domain.py<br/>the brain: timing models, grid reading, ODS checks<br/>(pure Python, no Windows imports)"]
+    D["domain.py<br/>the brain: timing models, grid reading, workbook checks<br/>(pure Python, no Windows imports)"]
 ```
 
-Nearly all input goes through one module, `gui_support.py`, so everything the agent does
-is human-timed in one place. The decision logic lives in `domain.py` with no Windows
-dependencies, which is why the whole agent runs under test on any OS.
+One orchestrator runs the schedule and hands over to three task modules in turn. Nearly
+every key, click and screen read goes through one module, the hands, so everything is
+human-timed in one place, and it is real OS-level input rather than control from inside the
+browser. The decision logic lives in a separate brain with no Windows code, which is why
+the whole agent (about 4,800 lines in 7 modules) runs under 470 tests on any laptop.
 
-## Built on the VM, one failure at a time
+## Every VM failure became a fix
 
-The agent went through seven recorded rounds on the organisers' VM. Each failure became
-a fix and a regression test:
+We couldn't drive the organisers' VM directly, so each of seven test rounds was
+screen-recorded and analysed frame by frame. Every problem got a fix and a test that
+reproduces it:
 
 | What broke | What changed |
 |---|---|
 | Spreadsheet ranges never selected | Read the grid from pixels; send arrows as extended keys |
 | Ctrl+D opened a selection list instead of filling down | Copy and paste formulas |
-| A mouse resting over the VM console moved the agent's pointer | Recheck the pointer before every click |
-| The workbook saved into the wrong folder | Steer the Save dialog to the Desktop, never answer "replace" outside it |
-| A bad file copy crashed a run | Compare every file against `BUILD.json` before any input |
+| A mouse resting on the host moved the VM's pointer | Recheck the pointer before every click |
+| The workbook saved into the wrong folder | Steer the Save dialog to the Desktop; never answer "replace" outside it |
+| A bad file copy crashed a run | Check every file against `BUILD.json` before any input |
 | Sysmon showed the agent writing log files | Removed all file output |
 | The notes were cut off mid-line | Choose lines to fit the measured typing speed |
 
-The full round-by-round notes are in [DEVLOG.md](DEVLOG.md).
+The round-by-round notes are in [DEVLOG.md](DEVLOG.md).
+
+## Limits
+
+- The agent's own `pythonw.exe` is visible in the process tree, as a child of Explorer.
+- Windows marks software-generated input as injected (`LLKHF_INJECTED`), so a low-level hook
+  can tell it apart. A hardware input device would close this gap.
+- Keys never overlap: each is released before the next is pressed, while fast typists often
+  roll over.
+- Grid reading is tuned to the VM's 1280×800 screen and Calc's default theme; display
+  scaling is untested. If the grid can't be read, the agent falls back to the keyboard.
 
 ## Running it
 
@@ -149,15 +187,15 @@ python3 -B -m unittest discover -s tests
 ### On the Windows VM
 
 1. Install Python 3.12 and the dependencies: `pip install -r requirements.txt`.
-2. On any machine, build the package with `python3 tools/make_zip.py`. It writes the
-   agent files plus `BUILD.json`, a SHA-256 for each `.py` file and `config.json`, which
-   the agent checks before it starts.
-3. Unzip it into a folder on the VM, then run `create_shortcut.ps1` once to put a
-   launcher shortcut on the desktop.
-4. Put desktop shortcuts named **Google Chrome**, **OpenOffice Calc** and **Notepad** on
-   the desktop (names are set in `config.json`; without the Notepad one, Win+R is used).
-5. Double-click the launcher and choose **Full demo**. Press **F8**, or move the pointer
-   into a screen corner, to stop.
+2. On any machine, build the package with `python3 tools/make_zip.py`. It writes the agent
+   files plus `BUILD.json`, a SHA-256 for each `.py` file and `config.json`, which the agent
+   checks before it starts.
+3. Unzip it into a folder on the VM, then run `create_shortcut.ps1` once to put a launcher
+   shortcut on the desktop.
+4. Put shortcuts named **Google Chrome**, **OpenOffice Calc** and **Notepad** on the desktop
+   (names are set in `config.json`; without the Notepad one, Win+R is used).
+5. Double-click the launcher and choose **Full demo**. Press **F8**, or move the pointer into
+   a screen corner, to stop.
 
 ## Repository layout
 
@@ -168,34 +206,22 @@ python3 -B -m unittest discover -s tests
 | `inventory_action.py` | Calc: grid reading, data entry, formulas, formatting, sorting, saving |
 | `notes_action.py` | Notepad: the run summary, ending with `END` |
 | `save_dialog.py` | The Windows Save dialog, driven by clicks |
-| `gui_support.py` | The only place input is produced: pointer, clicks, typing, screen grabs |
-| `domain.py` | Pure logic: timing models, grid detection, ODS validation |
+| `gui_support.py` | The only place input is produced: pointer, clicks, typing, screen reads |
+| `domain.py` | Pure logic: timing models, grid detection, workbook validation |
 | `config.json` | Homepages, phase lengths, probabilities and shortcut names |
 | `inspect_ui.py` | Optional diagnostics: what Calc or Chrome exposes to UI Automation |
 | `tests/` | Offline test suite and the Calc simulator |
 | `tools/make_zip.py` | Builds the VM package and `BUILD.json` |
 
-## Limits
-
-- The agent's own `pythonw.exe` is visible in the process tree, as a child of Explorer.
-- Input is generated in software, and Windows marks software input as injected
-  (`LLKHF_INJECTED`), so a low-level hook can tell it apart. A hardware input device
-  would close this gap.
-- Grid reading is tuned to the VM's 1280×800 screen and Calc's default theme. If the
-  grid can't be read, the agent falls back to the keyboard.
-
 ## Related work
 
 CMU SEI's GHOSTS (Updyke et al., 2018) is the best-known synthetic-user framework. Its
-open-source Windows client launches Office through COM and the browser through
-Selenium, so a reviewer sees the automation process, not Explorer, as the parent, and
-it enters text in a single call rather than key by key.
-Detection research on browser agents (Choudhary et al., 2026) finds that automation
-driven through the page lacks the raw pointer and wheel streams real input produces.
-This agent therefore drives the real desktop with OS-level mouse and keyboard input,
-starts every app from its icon, and times each key, click and pause like a person.
-Activity simulators are judged on when actions happen as much as what they are
-(Lamp et al., 2025), which is why timing gets as much care here as the tasks.
+Windows client starts Office through COM and the browser through Selenium, so a reviewer
+sees automation, not Explorer, as the parent, and it enters text in one call rather than key
+by key. Detection research on browser agents (Choudhary et al., 2026) finds that automation
+driven from inside the page lacks the raw pointer and wheel streams real input produces.
+Activity simulators are judged on when actions happen as much as what they are (Lamp et al.,
+2025), which is why timing gets as much care here as the tasks.
 
 ## References
 
@@ -224,8 +250,8 @@ Activity simulators are judged on when actions happen as much as what they are
 - [PyAutoGUI](https://pyautogui.readthedocs.io/) for pointer and keyboard input.
 - [pywinauto](https://pywinauto.readthedocs.io/) for reading window and control state
   through UI Automation.
-- [pywin32](https://pypi.org/project/pywin32/) for Win32 calls: window handles, key
-  state, the clipboard and screen capture.
+- [pywin32](https://pypi.org/project/pywin32/) for Win32 calls: window handles, key state,
+  the clipboard and screen capture.
 - The Python standard library, including tkinter for the launcher.
 
 ## Team 21
