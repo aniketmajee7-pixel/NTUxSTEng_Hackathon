@@ -1,48 +1,42 @@
-# Synthetic Human Agent
+<div align="center">
 
-**🏆 Champion of the NTU × ST Engineering Hackathon 2026**, "Synthetic Human Agent"
-challenge, by Team 21.
+# 🏆 Champions out of 30 teams
 
-A Python program that sits at a Windows 11 computer and does fifteen minutes of ordinary
-office work the way a person would. It reads news sites in Chrome, builds a stock-inventory
-spreadsheet in OpenOffice Calc, and types a short account of the session in Notepad.
-Nobody touches the keyboard.
+**NTU × ST Engineering Hackathon 2026** · "Synthetic Human Agent" challenge
+
+</div>
+
+A Python agent that sits at a Windows 11 computer and does fifteen minutes of ordinary office
+work the way a person would. It reads news sites in Chrome, builds a stock-inventory
+spreadsheet in OpenOffice Calc, and types a short account of the session in Notepad, ending
+with the line `END`. Nobody touches the keyboard.
 
 The hard part is that it was judged from the system logs, not just the screen. A security
-reviewer reading Sysmon, Process Explorer and Event Viewer should see a person at work:
-apps started from their icons, human timing, and no trace of a script.
+reviewer reading Sysmon, Process Explorer and Event Viewer should see a person at work: apps
+started from their icons, human timing, and no trace of a script.
 
-In short: **it starts like a person, moves like a person, and works like a person.**
+**It starts like a person, moves like a person, and works like a person.**
 
 ## Demo
 
 https://github.com/user-attachments/assets/91e0d37a-fee1-4572-a82f-7644d8d3cf14
 
-The three-minute version shown at the finals, recorded in real time and uncut on the
-organisers' VM. It does the same three jobs as the full run, with three spreadsheet records
-instead of seven.
+The three-minute version shown at the finals, recorded uncut and in real time on the
+organisers' VM: the same three jobs as the full run, with three spreadsheet records instead
+of seven.
 
-## The task
+## The challenge
 
-On an air-gapped Windows 11 VM supplied by the organisers, inside 15 minutes and unattended:
+The agent runs unattended on an air-gapped Windows 11 VM supplied by the organisers and has
+to finish inside 15 minutes. Entries were scored on **process authenticity** (30%), **human
+entropy and timing** (30%), **complexity of action** (20%) and **resource efficiency** (20%):
+who started each program, is the timing human, is it doing real work across apps, and is it
+light on the machine?
 
-| | Job | What the agent does |
-|---|---|---|
-| 1 | **Browse** in Chrome | Opens news and tech homepages, gets past certificate warnings and pop-ups, reads, searches within a page |
-| 2 | **Build** in OpenOffice Calc | Enters inventory records, formulas and totals, formats and sorts the sheet, saves it with Save As |
-| 3 | **Write** in Notepad | Types an account of the session, ending with the line `END` |
-
-Entries were scored on **process authenticity** (30%), **human entropy and timing** (30%),
-**complexity of action** (20%) and **resource efficiency** (20%). That is four questions a
-reviewer asks: who started each program, is the timing human, is it doing real work across
-apps, and is it light on the machine?
-
-### What stood in the way
+What stood in the way:
 
 - **Calc is invisible to automation.** OpenOffice Calc 4.1 tells Windows nothing about its
   cells, menus or Name Box, so the sheet has to be read from the screen.
-- **The VM's input has quirks.** Shift+arrow lost the Shift, Ctrl+D opens a list instead of
-  filling down, and a mouse resting on the host machine moved the VM's pointer.
 - **The web fights back.** Certificate warnings (some with no way through), cookie banners,
   offer pop-ups, and pages that load blank.
 - **A hard 15-minute limit** that has to hold even when the VM runs slow.
@@ -60,11 +54,11 @@ apps, and is it light on the machine?
 
 ### Starts like a person
 
-The agent itself is started from a desktop shortcut (`pythonw.exe`, so no console window),
-and it opens Chrome, Calc and Notepad by double-clicking their icons. Explorer is the parent
-of every app, which is what Sysmon shows for a real user. It never calls `subprocess`,
-`os.startfile` or COM, and it writes no files of its own during a run. Before any input it
-checks every file against a SHA-256 manifest, so a bad copy stops before Chrome opens.
+The agent is started from a desktop shortcut (`pythonw.exe`, so no console window) and opens
+Chrome, Calc and Notepad by double-clicking their icons. Explorer is the parent of every app,
+which is what Sysmon shows for a real user. It never calls `subprocess`, `os.startfile` or
+COM, and writes no files of its own during a run. Before any input it checks every file
+against a SHA-256 manifest, so a bad copy stops before Chrome opens.
 
 ### Moves like a person
 
@@ -76,7 +70,8 @@ slightly off and correct, and the path has a small bow, tremor and uneven sampli
 ### Pauses like a person
 
 Every pause (hovering before a click, reading a page) is drawn from a lognormal
-distribution: most are short and a few run long, as people's do. A flat random range is not
+distribution: most are short and a few run long. Studies of how long people stay on web
+pages show the same long tail (Liu et al., 2010; Nielsen, 2011). A flat random range is not
 enough; chat bots with uniformly random delays were still caught by entropy tests
 (Gianvecchio et al., 2008). Each run is a new person: pace, scroll speed, typo rate and pause
 length are drawn fresh at the start.
@@ -97,10 +92,10 @@ never inside a formula or a file path. The resulting variability was checked aga
   the headers before typing, with a keyboard fallback if the grid is lost.
 - **Checks its own work.** After saving, it opens the `.ods` file and verifies the records,
   the total and the budget result.
-- **Handles a messy web.** On a certificate warning it checks the site name, then Advanced,
-  then Proceed; if there is no Proceed it skips the site. It accepts cookie consent, closes
-  offers with their X, types addresses, opens tabs, searches within pages, and never counts
-  a page it couldn't read as read.
+- **Handles a messy web.** On a certificate warning it checks the site name, then clicks
+  Advanced and Proceed, or skips the site if there is no Proceed. It accepts cookie consent,
+  closes offers with their X, types addresses, opens tabs, searches within pages, and never
+  counts a page it couldn't read as read.
 - **Keeps to time.** Each app has a hard deadline. Calc does the essentials first and
   polishes only if time allows, and the notes are chosen line by line to fit the typing
   speed measured during the run, so `END` always lands inside 15 minutes.
@@ -143,6 +138,11 @@ human-timed in one place, and it is real OS-level input rather than control from
 browser. The decision logic lives in a separate brain with no Windows code, which is why
 the whole agent (about 4,800 lines in 7 modules) runs under 470 tests on any laptop.
 
+Alongside the modules: `config.json` (homepages, phase lengths, probabilities and shortcut
+names), `inspect_ui.py` (optional diagnostics of what Calc and Chrome expose to UI
+Automation), `tests/` (the offline suite and the Calc simulator) and `tools/make_zip.py`
+(builds the VM package and `BUILD.json`).
+
 ## Every VM failure became a fix
 
 We couldn't drive the organisers' VM directly, so each of seven test rounds was
@@ -176,42 +176,23 @@ The round-by-round notes are in [DEVLOG.md](DEVLOG.md).
 ### Offline tests (any OS)
 
 The tests fake pyautogui, pywinauto and pywin32, and simulate OpenOffice Calc with its
-quirks, a simulated clock and a slowness factor.
+quirks, a simulated clock and a slowness factor. All 470 run in about 12 seconds:
 
 ```bash
 python3 -B -m unittest discover -s tests
 ```
 
-470 tests, about 12 seconds.
-
 ### On the Windows VM
 
 1. Install Python 3.12 and the dependencies: `pip install -r requirements.txt`.
 2. On any machine, build the package with `python3 tools/make_zip.py`. It writes the agent
-   files plus `BUILD.json`, a SHA-256 for each `.py` file and `config.json`, which the agent
-   checks before it starts.
+   files plus `BUILD.json`, the SHA-256 manifest the agent checks before it starts.
 3. Unzip it into a folder on the VM, then run `create_shortcut.ps1` once to put a launcher
    shortcut on the desktop.
 4. Put shortcuts named **Google Chrome**, **OpenOffice Calc** and **Notepad** on the desktop
    (names are set in `config.json`; without the Notepad one, Win+R is used).
 5. Double-click the launcher and choose **Full demo**. Press **F8**, or move the pointer into
    a screen corner, to stop.
-
-## Repository layout
-
-| File | Role |
-|---|---|
-| `main.py` | Launcher, preflight checks and the phase schedule |
-| `browser_action.py` | Chrome: typed addresses, certificate warnings, consent, reading, find-in-page |
-| `inventory_action.py` | Calc: grid reading, data entry, formulas, formatting, sorting, saving |
-| `notes_action.py` | Notepad: the run summary, ending with `END` |
-| `save_dialog.py` | The Windows Save dialog, driven by clicks |
-| `gui_support.py` | The only place input is produced: pointer, clicks, typing, screen reads |
-| `domain.py` | Pure logic: timing models, grid detection, workbook validation |
-| `config.json` | Homepages, phase lengths, probabilities and shortcut names |
-| `inspect_ui.py` | Optional diagnostics: what Calc or Chrome exposes to UI Automation |
-| `tests/` | Offline test suite and the Calc simulator |
-| `tools/make_zip.py` | Builds the VM package and `BUILD.json` |
 
 ## Related work
 
@@ -254,6 +235,6 @@ Activity simulators are judged on when actions happen as much as what they are (
   the clipboard and screen capture.
 - The Python standard library, including tkinter for the launcher.
 
-## Team 21
+## Team
 
 Ryan Lim · Aniket Majee · Ethan Kok · Lai Longze · Matthew Lim
